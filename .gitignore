@@ -1,2 +1,16 @@
+# Model weights
 sam3.pt
+
+# Python
+__pycache__/
+*.pyc
+
+# Virtual environments
 venv/
+
+# OS
+.DS_Store
+
+# Output files
+*.mp4
+!laundry_pile.mp4

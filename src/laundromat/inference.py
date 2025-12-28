@@ -86,7 +86,7 @@ def run_inference_on_frame(
     resnet: torch.nn.Module,
     preprocess,
     config: VideoProcessorConfig
-) -> List[Dict[str, Any]]:
+) -> Tuple[List[Dict[str, Any]], int]:
     """
     Run full inference pipeline on a single frame.
     
@@ -104,7 +104,7 @@ def run_inference_on_frame(
         config: Video processor configuration
         
     Returns:
-        List of dictionaries containing pair data for tracking
+        Tuple of (pairs_data list, total_socks_detected)
     """
     # Convert to RGB and grayscale
     frame_rgb = cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2RGB)
@@ -116,11 +116,14 @@ def run_inference_on_frame(
     results = predictor(text=[config.detection_prompt])
     
     if not results or not results[0].masks:
-        return []
+        return [], 0
     
     result = results[0]
     masks = result.masks.data.cpu().numpy()
     boxes = result.boxes.xyxy.cpu().numpy()
+    
+    # Total socks detected by SAM3
+    total_socks_detected = len(masks)
     
     # Extract features
     embeddings, valid_indices = extract_features(
@@ -128,7 +131,7 @@ def run_inference_on_frame(
     )
     
     if len(embeddings) == 0:
-        return []
+        return [], total_socks_detected
     
     # Find best pairs
     top_pairs = find_best_pairs(
@@ -177,7 +180,7 @@ def run_inference_on_frame(
                 'transform': np.eye(3)
             })
     
-    return pairs_data
+    return pairs_data, total_socks_detected
 
 def inference_worker(
     input_queue,
@@ -195,7 +198,7 @@ def inference_worker(
     
     Args:
         input_queue: Queue providing frames to process
-        output_queue: Queue to put results into
+        output_queue: Queue to put results into (tuple of pairs_data, total_socks)
         predictor: SAM3 semantic predictor
         resnet: ResNet feature extractor
         preprocess: Preprocessing transform
@@ -208,12 +211,12 @@ def inference_worker(
             break
         
         try:
-            result_data = run_inference_on_frame(
+            pairs_data, total_socks = run_inference_on_frame(
                 frame_bgr, predictor, resnet, preprocess, config
             )
-            output_queue.put(result_data)
+            output_queue.put((pairs_data, total_socks))
         except Exception as e:
             print(f"Inference error: {e}")
-            output_queue.put([])
+            output_queue.put(([], 0))
         finally:
             input_queue.task_done()

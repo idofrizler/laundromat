@@ -86,6 +86,30 @@ class VideoProcessorConfig:
 
 
 @dataclass
+class CameraConfig:
+    """Configuration for camera capture."""
+    
+    # Camera device index (0 = default camera)
+    camera_index: int = 0
+    
+    # Preferred resolution (will try to get highest available up to this)
+    preferred_width: int = 3840   # 4K UHD
+    preferred_height: int = 2160
+    
+    # Preferred FPS
+    preferred_fps: int = 30
+    
+    # Common resolutions to try (in order of preference)
+    # Will try each until one works
+    resolution_fallbacks: List[Tuple[int, int]] = field(default_factory=lambda: [
+        (3840, 2160),  # 4K UHD
+        (2560, 1440),  # QHD
+        (1920, 1080),  # Full HD
+        (1280, 720),   # HD
+        (640, 480),    # VGA (fallback)
+    ])
+
+@dataclass
 class PairItemData:
     """Data structure for a single detected item in a pair."""
     

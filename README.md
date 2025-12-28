@@ -43,7 +43,7 @@ pip install -r requirements.txt
 
 ## Usage
 
-### Basic Usage
+### Video File Mode
 
 Place your video file named `laundry_pile.mp4` in the project directory, then run:
 
@@ -51,9 +51,63 @@ Place your video file named `laundry_pile.mp4` in the project directory, then ru
 python main.py
 ```
 
+Or specify a different video file:
+
+```bash
+python main.py --video my_laundry.mp4
+```
+
 Press `q` to stop processing. The output will be saved to `laundry_pairs_output.mp4`.
 
-### Custom Configuration
+### Interactive Camera Mode (NEW)
+
+Use your webcam for real-time sock pair detection:
+
+```bash
+python main.py --camera
+```
+
+The system will automatically detect and use the highest available resolution (up to 4K).
+
+#### Camera Options
+
+```bash
+# Use default camera at max resolution
+python main.py --camera
+
+# Use a specific camera (e.g., external webcam)
+python main.py --camera --camera-index 1
+
+# Set custom resolution
+python main.py --camera --width 1920 --height 1080
+
+# Detect multiple pairs
+python main.py --camera --pairs 3
+
+# Camera mode without recording
+python main.py --camera --no-record
+
+# Set custom FPS
+python main.py --camera --fps 60
+```
+
+### Command Line Options
+
+| Option | Short | Default | Description |
+|--------|-------|---------|-------------|
+| `--camera` | `-c` | - | Use webcam instead of video file |
+| `--video` | `-v` | `laundry_pile.mp4` | Path to video file |
+| `--camera-index` | `-i` | `0` | Camera device index |
+| `--width` | `-W` | `3840` | Preferred camera width (4K) |
+| `--height` | `-H` | `2160` | Preferred camera height (4K) |
+| `--fps` | - | `30` | Preferred camera FPS |
+| `--pairs` | `-p` | `1` | Number of pairs to detect |
+| `--refresh` | `-r` | `2.0` | Detection refresh interval (seconds) |
+| `--output` | `-o` | `laundry_pairs_output.mp4` | Output video path |
+| `--no-record` | - | - | Disable recording (camera only) |
+| `--no-preview` | - | - | Disable preview window |
+
+### Programmatic Usage
 
 ```python
 from laundromat import SockPairVideoProcessor

@@ -8,7 +8,7 @@ import queue
 import threading
 from typing import Optional, List, Dict, Any
 
-from .config import VideoProcessorConfig, DEFAULT_PAIR_COLORS
+from .config import VideoProcessorConfig, CameraConfig, DEFAULT_PAIR_COLORS
 from .models import load_sam3_predictor, load_resnet_feature_extractor
 from .inference import inference_worker
 from .tracking import (
@@ -46,6 +46,7 @@ class SockPairVideoProcessor:
         self._worker_thread: Optional[threading.Thread] = None
         
         self._current_pairs_data: List[Dict[str, Any]] = []
+        self._total_socks_detected: int = 0
         self._prev_gray: Optional[np.ndarray] = None
         self._pending_inference: bool = False
         self._lag_transform: np.ndarray = np.eye(3)
@@ -295,7 +296,10 @@ class SockPairVideoProcessor:
                 # 2. Check for inference results
                 if self._pending_inference:
                     try:
-                        new_data = self._output_queue.get_nowait()
+                        new_data, total_socks = self._output_queue.get_nowait()
+                        
+                        # Update total socks detected
+                        self._total_socks_detected = total_socks
                         
                         # Apply lag compensation
                         for item in new_data:
@@ -330,7 +334,8 @@ class SockPairVideoProcessor:
                     frame_bgr,
                     self._current_pairs_data,
                     mask_alpha=self.config.mask_alpha,
-                    border_width=self.config.border_width
+                    border_width=self.config.border_width,
+                    total_socks_detected=self._total_socks_detected
                 )
                 
                 if show_preview:
@@ -354,6 +359,215 @@ class SockPairVideoProcessor:
             if show_preview:
                 cv2.destroyAllWindows()
             print(f"Saved to {output_path}")
+            
+            # Reset state
+            self._current_pairs_data = []
+            self._prev_gray = None
+            self._pending_inference = False
+            self._lag_transform = np.eye(3)
+    
+    def _setup_camera_resolution(
+        self,
+        cap: cv2.VideoCapture,
+        camera_config: CameraConfig
+    ) -> tuple:
+        """
+        Configure camera to use the highest available resolution.
+        
+        Args:
+            cap: OpenCV VideoCapture object
+            camera_config: Camera configuration with resolution preferences
+            
+        Returns:
+            Tuple of (width, height, fps) that was actually set
+        """
+        # Try preferred resolution first
+        resolutions_to_try = [(camera_config.preferred_width, camera_config.preferred_height)]
+        resolutions_to_try.extend(camera_config.resolution_fallbacks)
+        
+        # Remove duplicates while preserving order
+        seen = set()
+        unique_resolutions = []
+        for res in resolutions_to_try:
+            if res not in seen:
+                seen.add(res)
+                unique_resolutions.append(res)
+        
+        actual_width = 0
+        actual_height = 0
+        
+        for width, height in unique_resolutions:
+            # Try to set the resolution
+            cap.set(cv2.CAP_PROP_FRAME_WIDTH, width)
+            cap.set(cv2.CAP_PROP_FRAME_HEIGHT, height)
+            
+            # Verify what was actually set
+            actual_width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+            actual_height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+            
+            if actual_width == width and actual_height == height:
+                print(f"✓ Set resolution to {width}x{height}")
+                break
+            elif actual_width >= width * 0.9 and actual_height >= height * 0.9:
+                # Close enough (some cameras round to nearest supported)
+                print(f"✓ Set resolution to {actual_width}x{actual_height} (requested {width}x{height})")
+                break
+            else:
+                print(f"  Tried {width}x{height}, got {actual_width}x{actual_height}")
+        
+        # Set FPS
+        cap.set(cv2.CAP_PROP_FPS, camera_config.preferred_fps)
+        actual_fps = int(cap.get(cv2.CAP_PROP_FPS))
+        if actual_fps == 0:
+            actual_fps = 30  # Default fallback
+        
+        return actual_width, actual_height, actual_fps
+    
+    def process_camera(
+        self,
+        camera_config: Optional[CameraConfig] = None,
+        output_path: Optional[str] = None,
+        show_preview: bool = True,
+        record: bool = True
+    ):
+        """
+        Process live camera feed for sock pair detection.
+        
+        Attempts to set the highest possible resolution (up to 4K).
+        
+        Args:
+            camera_config: Camera configuration. Uses defaults if not provided.
+            output_path: Path for output video (uses config default if None)
+            show_preview: Whether to show live preview window
+            record: Whether to record the output to a file
+        """
+        if self.predictor is None:
+            self.load_models()
+        
+        camera_config = camera_config or CameraConfig()
+        output_path = output_path or self.config.output_path
+        
+        print(f"Opening camera {camera_config.camera_index}...")
+        cap = cv2.VideoCapture(camera_config.camera_index)
+        
+        if not cap.isOpened():
+            raise ValueError(f"Error opening camera {camera_config.camera_index}")
+        
+        # Configure resolution
+        print("Configuring camera resolution...")
+        width, height, fps = self._setup_camera_resolution(cap, camera_config)
+        
+        print(f"Camera ready: {width}x{height} @ {fps}fps")
+        
+        # Setup video writer if recording
+        out_writer = None
+        if record:
+            fourcc = cv2.VideoWriter_fourcc(*'mp4v')
+            out_writer = cv2.VideoWriter(output_path, fourcc, fps, (width, height))
+            print(f"Recording to: {output_path}")
+        
+        if show_preview:
+            print("Press 'q' to stop.")
+        
+        # Start worker thread
+        self._start_worker()
+        
+        frame_count = 0
+        process_every_n = int(fps * self.config.refresh_interval_seconds) if fps > 0 else 30
+        
+        try:
+            while True:
+                ret, frame_bgr = cap.read()
+                if not ret:
+                    print("Failed to read from camera")
+                    break
+                
+                frame_count += 1
+                frame_gray = cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2GRAY)
+                
+                # 1. Compute global motion for lag compensation
+                if self._prev_gray is not None:
+                    global_motion = compute_global_motion(
+                        self._prev_gray,
+                        frame_gray,
+                        max_corners=self.config.global_max_corners,
+                        quality_level=self.config.global_quality_level,
+                        min_distance=self.config.global_min_distance,
+                        win_size=self.config.global_flow_win_size,
+                        max_level=self.config.global_flow_max_level
+                    )
+                    
+                    if self._pending_inference:
+                        self._lag_transform = global_motion @ self._lag_transform
+                
+                # 2. Check for inference results
+                if self._pending_inference:
+                    try:
+                        new_data, total_socks = self._output_queue.get_nowait()
+                        
+                        # Update total socks detected
+                        self._total_socks_detected = total_socks
+                        
+                        # Apply lag compensation
+                        for item in new_data:
+                            item['transform'] = self._lag_transform @ item['transform']
+                            if item['points'] is not None:
+                                item['points'] = apply_transform_to_points(
+                                    item['points'],
+                                    self._lag_transform
+                                )
+                        
+                        # Apply color persistence
+                        self._apply_color_persistence(new_data, width, height)
+                        
+                        self._current_pairs_data = new_data
+                        self._pending_inference = False
+                        
+                    except queue.Empty:
+                        pass
+                
+                # 3. Trigger new inference if needed
+                if not self._pending_inference and frame_count % process_every_n == 1:
+                    if self._input_queue.empty():
+                        self._input_queue.put(frame_bgr.copy())
+                        self._pending_inference = True
+                        self._lag_transform = np.eye(3)
+                
+                # 4. Update tracking
+                self._update_tracking(frame_gray)
+                
+                # 5. Draw and output
+                final_frame = composite_frame(
+                    frame_bgr,
+                    self._current_pairs_data,
+                    mask_alpha=self.config.mask_alpha,
+                    border_width=self.config.border_width,
+                    total_socks_detected=self._total_socks_detected
+                )
+                
+                if show_preview:
+                    cv2.imshow("Sock Pairs - Camera", final_frame)
+                
+                if out_writer is not None:
+                    out_writer.write(final_frame)
+                
+                self._prev_gray = frame_gray.copy()
+                
+                if show_preview and cv2.waitKey(1) & 0xFF == ord('q'):
+                    print("Stopping...")
+                    break
+        
+        except KeyboardInterrupt:
+            print("Interrupted by user.")
+        
+        finally:
+            self._stop_worker()
+            cap.release()
+            if out_writer is not None:
+                out_writer.release()
+                print(f"Saved recording to {output_path}")
+            if show_preview:
+                cv2.destroyAllWindows()
             
             # Reset state
             self._current_pairs_data = []

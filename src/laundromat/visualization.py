@@ -78,11 +78,81 @@ def draw_pair_overlays(
     
     return result
 
+def draw_stats_overlay(
+    frame_bgr: np.ndarray,
+    total_socks: int,
+    matched_socks: int,
+    num_pairs: int
+) -> np.ndarray:
+    """
+    Draw statistics overlay showing detection counts.
+    
+    Args:
+        frame_bgr: BGR frame from OpenCV
+        total_socks: Total number of socks detected by SAM3
+        matched_socks: Number of socks that are part of matched pairs
+        num_pairs: Number of pairs detected
+        
+    Returns:
+        BGR frame with stats overlay
+    """
+    height, width = frame_bgr.shape[:2]
+    
+    # Create semi-transparent background for text
+    overlay = frame_bgr.copy()
+    
+    # Calculate text size based on frame resolution
+    font_scale = max(0.6, min(width, height) / 1000)
+    thickness = max(1, int(font_scale * 2))
+    padding = int(15 * font_scale)
+    
+    # Prepare text lines
+    lines = [
+        f"Socks detected: {total_socks}",
+        f"Pairs matched: {num_pairs} ({matched_socks} socks)"
+    ]
+    
+    # Calculate text dimensions
+    font = cv2.FONT_HERSHEY_SIMPLEX
+    line_heights = []
+    line_widths = []
+    
+    for line in lines:
+        (text_width, text_height), baseline = cv2.getTextSize(line, font, font_scale, thickness)
+        line_heights.append(text_height + baseline)
+        line_widths.append(text_width)
+    
+    # Background rectangle dimensions
+    box_width = max(line_widths) + padding * 2
+    box_height = sum(line_heights) + padding * 2 + padding // 2  # Extra spacing between lines
+    
+    # Position in top-left corner
+    box_x1, box_y1 = 10, 10
+    box_x2, box_y2 = box_x1 + box_width, box_y1 + box_height
+    
+    # Draw semi-transparent background
+    cv2.rectangle(overlay, (box_x1, box_y1), (box_x2, box_y2), (0, 0, 0), -1)
+    frame_bgr = cv2.addWeighted(overlay, 0.6, frame_bgr, 0.4, 0)
+    
+    # Draw text
+    y_offset = box_y1 + padding + line_heights[0] - 5
+    for i, line in enumerate(lines):
+        # White text with slight shadow for readability
+        cv2.putText(frame_bgr, line, (box_x1 + padding + 1, y_offset + 1), 
+                    font, font_scale, (0, 0, 0), thickness + 1)
+        cv2.putText(frame_bgr, line, (box_x1 + padding, y_offset), 
+                    font, font_scale, (255, 255, 255), thickness)
+        y_offset += line_heights[i] + padding // 2
+    
+    return frame_bgr
+
 def composite_frame(
     frame_bgr: np.ndarray,
     pairs_data: List[Dict[str, Any]],
     mask_alpha: int = 100,
-    border_width: int = 3
+    border_width: int = 3,
+    show_stats: bool = True,
+    total_socks_detected: int = 0
 ) -> np.ndarray:
     """
     Create a composited frame with pair overlays.
@@ -92,6 +162,8 @@ def composite_frame(
         pairs_data: List of pair item dictionaries
         mask_alpha: Alpha value for mask fill
         border_width: Width of contour border
+        show_stats: Whether to show detection statistics overlay
+        total_socks_detected: Total number of socks detected by SAM3
         
     Returns:
         BGR frame with overlays drawn
@@ -115,6 +187,14 @@ def composite_frame(
     # Convert back to BGR
     result_rgb = np.array(result_pil.convert('RGB'))
     result_bgr = cv2.cvtColor(result_rgb, cv2.COLOR_RGB2BGR)
+    
+    # Add stats overlay
+    if show_stats:
+        matched_socks = len(pairs_data)
+        # Count unique pairs (each pair has 2 items with same label)
+        unique_labels = set(item['label'] for item in pairs_data)
+        num_pairs = len(unique_labels)
+        result_bgr = draw_stats_overlay(result_bgr, total_socks_detected, matched_socks, num_pairs)
     
     return result_bgr
 

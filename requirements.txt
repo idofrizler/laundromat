@@ -1,0 +1,3 @@
+ultralytics
+boto3
+pandas

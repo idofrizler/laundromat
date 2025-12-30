@@ -385,14 +385,23 @@ class LaundromatClient {
             
             // 4. Process Results
             this.pairs = result.pairs_data.map(item => {
-                // Normalize points
-                let points = (item.points || []).map(p => Array.isArray(p[0]) ? p[0] : p);
+                const mask = this.decodeMaskRLE(item.mask_rle);
                 
-                // Apply Lag Shift immediately
+                // Calculate scale factors (mask coords -> video coords)
+                const scaleX = this.video.videoWidth / mask.width;
+                const scaleY = this.video.videoHeight / mask.height;
+                
+                // Normalize and scale points from mask coords to video coords
+                let points = (item.points || []).map(p => {
+                    const pt = Array.isArray(p[0]) ? p[0] : p;
+                    return [pt[0] * scaleX, pt[1] * scaleY];
+                });
+                
+                // Apply Lag Shift (in video coordinates)
                 points = points.map(p => [p[0] + lagShift.x, p[1] + lagShift.y]);
                 
                 const p = {
-                    mask: this.decodeMaskRLE(item.mask_rle),
+                    mask: mask,
                     box: item.box,
                     label: item.label,
                     color: item.color,
@@ -493,25 +502,28 @@ class LaundromatClient {
         for (const p of this.pairs) {
             if (!p.maskCanvas) continue;
             
+            // Calculate scale factors for this mask (mask coords -> canvas coords)
             const scaleX = this.canvas.width / p.mask.width;
             const scaleY = this.canvas.height / p.mask.height;
             
+            // offset is in video/canvas coordinates, so use it directly for translation
             this.ctx.save();
-            this.ctx.translate(p.offset.x * scaleX, p.offset.y * scaleY);
+            this.ctx.translate(p.offset.x, p.offset.y);
             this.ctx.drawImage(p.maskCanvas, 0, 0, this.canvas.width, this.canvas.height);
             this.ctx.restore();
             
-            // Label
-            const cx = (p.box[0] + p.box[2]) / 2 + p.offset.x;
-            const cy = (p.box[1] + p.box[3]) / 2 + p.offset.y;
+            // Label - box coordinates are in mask space, need to scale to canvas
+            // Then add offset which is already in canvas coordinates
+            const cx = (p.box[0] + p.box[2]) / 2 * scaleX + p.offset.x;
+            const cy = (p.box[1] + p.box[3]) / 2 * scaleY + p.offset.y;
             
             this.ctx.font = 'bold 24px sans-serif';
             this.ctx.textAlign = 'center';
             this.ctx.fillStyle = `rgb(${p.color.join(',')})`;
             this.ctx.strokeStyle = 'black';
             this.ctx.lineWidth = 3;
-            this.ctx.strokeText(p.label, cx * scaleX, cy * scaleY);
-            this.ctx.fillText(p.label, cx * scaleX, cy * scaleY);
+            this.ctx.strokeText(p.label, cx, cy);
+            this.ctx.fillText(p.label, cx, cy);
         }
         
         // FPS

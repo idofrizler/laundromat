@@ -55,15 +55,9 @@ class VideoProcessorConfig:
     # Detection prompt
     detection_prompt: str = "socks"
     
-    # Basket exclusion settings
-    basket_prompts: List[str] = field(default_factory=lambda: [
-        "laundry basket",
-        "laundry hamper", 
-        "hamper",
-        "basket",
-        "clothes basket",
-        "wicker basket"
-    ])
+    # Basket exclusion settings - single prompt for efficiency (one SAM3 call)
+    # Use "or" to cover different basket types
+    basket_prompt: str = "laundry basket or hamper or wicker basket or clothes basket"
     exclude_basket_socks: bool = True
     
     # Visualization settings

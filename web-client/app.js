@@ -431,9 +431,10 @@ class LaundromatClient {
             const formData = new FormData();
             formData.append('frame', blob, 'frame.jpg');
             const topN = document.getElementById('topNPairs').value;
+            const excludeBasket = document.getElementById('excludeBasket').checked;
 
             const response = await fetch(
-                `${this.serverUrl}/infer?top_n_pairs=${topN}`,
+                `${this.serverUrl}/infer?top_n_pairs=${topN}&exclude_basket=${excludeBasket}`,
                 { method: 'POST', body: formData }
             );
             

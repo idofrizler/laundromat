@@ -100,18 +100,20 @@ async def health_check():
 async def infer(
     frame: UploadFile = File(..., description="JPEG image of the frame to process"),
     top_n_pairs: int = Query(1, ge=1, le=10, description="Maximum number of pairs to detect"),
-    detection_prompt: str = Query("socks", description="Text prompt for detection")
+    detection_prompt: str = Query("socks", description="Text prompt for detection"),
+    exclude_basket: bool = Query(False, description="Enable basket detection and sock exclusion")
 ):
     """
     Run sock pair detection on a frame.
     
     Accepts a JPEG image and returns detected pairs with RLE-encoded masks.
-    Automatically detects laundry baskets and excludes socks inside them.
+    Optionally detects laundry baskets and excludes socks inside them.
     
     **Request:**
     - `frame`: JPEG image file (multipart/form-data)
     - `top_n_pairs`: Maximum pairs to return (1-10)
     - `detection_prompt`: What to detect (default: "socks")
+    - `exclude_basket`: Enable basket detection and sock exclusion (default: false)
     
     **Response:**
     ```json
@@ -127,13 +129,13 @@ async def infer(
         ],
         "total_socks_detected": 12,
         "inference_time_ms": 450.5,
-        "basket_boxes": [[x1, y1, x2, y2], ...]
+        "basket_masks": [{"counts": [...], "size": [H, W]}, ...]
     }
     ```
     
     **Notes:**
-    - Socks with centroids inside detected laundry baskets are excluded from pair matching
-    - `basket_boxes` contains bounding boxes of detected baskets (empty if none detected)
+    - When exclude_basket=true, socks with centroids inside detected laundry baskets are excluded from pair matching
+    - `basket_masks` contains RLE-encoded masks of detected baskets (empty if none detected or exclude_basket=false)
     """
     # Validate content type
     if frame.content_type not in ['image/jpeg', 'image/jpg', 'image/png']:
@@ -156,7 +158,8 @@ async def infer(
         result = service.infer_from_jpeg(
             frame_bytes,
             top_n_pairs=top_n_pairs,
-            detection_prompt=detection_prompt
+            detection_prompt=detection_prompt,
+            exclude_basket=exclude_basket
         )
         
         logger.info(

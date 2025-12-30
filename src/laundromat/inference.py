@@ -70,62 +70,42 @@ def is_point_in_mask(point: Tuple[float, float], mask: np.ndarray) -> bool:
 def detect_baskets(
     predictor,
     frame_bgr: np.ndarray,
-    basket_prompts: List[str]
+    basket_prompt: str
 ) -> Tuple[Optional[np.ndarray], Optional[np.ndarray]]:
     """
-    Detect laundry baskets in the frame using multiple prompts.
+    Detect laundry baskets in the frame using a single prompt.
     
-    Tries each prompt in order until baskets are found, then returns
-    the combined results from all successful prompts.
+    Uses a combined prompt for efficiency (single SAM3 call).
     
     Args:
         predictor: SAM3 semantic predictor
         frame_bgr: BGR frame
-        basket_prompts: List of text prompts for basket detection
+        basket_prompt: Text prompt for basket detection
         
     Returns:
         Tuple of (masks, boxes) or (None, None) if no baskets detected
     """
-    all_masks = []
-    all_boxes = []
+    logger.debug(f"Detecting baskets with prompt: '{basket_prompt}'")
     
-    for prompt in basket_prompts:
-        logger.debug(f"Trying basket prompt: '{prompt}'")
-        
-        # Need to set the image before running inference with a new prompt
-        predictor.set_image(frame_bgr)
-        results = predictor(text=[prompt])
-        
-        if not results or results[0].masks is None or len(results[0].masks) == 0:
-            logger.debug(f"  No baskets found with prompt: '{prompt}'")
-            continue
-        
-        result = results[0]
-        masks = result.masks.data.cpu().numpy()
-        boxes = result.boxes.xyxy.cpu().numpy()
-        
-        logger.info(f"Basket detection: {len(boxes)} basket(s) found with prompt '{prompt}'")
-        for i, box in enumerate(boxes):
-            x1, y1, x2, y2 = box
-            logger.debug(f"  Basket {i+1}: box=[{x1:.0f}, {y1:.0f}, {x2:.0f}, {y2:.0f}], "
-                        f"size={x2-x1:.0f}x{y2-y1:.0f}")
-        
-        all_masks.append(masks)
-        all_boxes.append(boxes)
-        
-        # Found baskets with this prompt - stop trying more prompts
-        # (to avoid duplicates and speed up detection)
-        break
+    # Set image and run inference
+    predictor.set_image(frame_bgr)
+    results = predictor(text=[basket_prompt])
     
-    if not all_masks:
-        logger.info(f"Basket detection: 0 baskets found (tried {len(basket_prompts)} prompts)")
+    if not results or results[0].masks is None or len(results[0].masks) == 0:
+        logger.info(f"Basket detection: 0 baskets found")
         return None, None
     
-    # Combine results
-    combined_masks = np.concatenate(all_masks, axis=0)
-    combined_boxes = np.concatenate(all_boxes, axis=0)
+    result = results[0]
+    masks = result.masks.data.cpu().numpy()
+    boxes = result.boxes.xyxy.cpu().numpy()
     
-    return combined_masks, combined_boxes
+    logger.info(f"Basket detection: {len(boxes)} basket(s) found")
+    for i, box in enumerate(boxes):
+        x1, y1, x2, y2 = box
+        logger.debug(f"  Basket {i+1}: box=[{x1:.0f}, {y1:.0f}, {x2:.0f}, {y2:.0f}], "
+                    f"size={x2-x1:.0f}x{y2-y1:.0f}")
+    
+    return masks, boxes
 
 
 def fill_mask_holes(mask: np.ndarray) -> np.ndarray:
@@ -343,7 +323,7 @@ def run_inference_on_frame(
     basket_masks_array = None
     if config.exclude_basket_socks:
         basket_masks_array, basket_boxes = detect_baskets(
-            predictor, frame_bgr, config.basket_prompts
+            predictor, frame_bgr, config.basket_prompt
         )
         
         if basket_masks_array is not None and len(basket_masks_array) > 0:

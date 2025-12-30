@@ -133,7 +133,8 @@ class InferenceService:
         self,
         frame_bgr: np.ndarray,
         top_n_pairs: int = 1,
-        detection_prompt: str = "socks"
+        detection_prompt: str = "socks",
+        exclude_basket: bool = False
     ) -> InferenceResult:
         """
         Run inference on a single frame.
@@ -142,9 +143,10 @@ class InferenceService:
             frame_bgr: BGR frame from OpenCV
             top_n_pairs: Maximum number of pairs to detect
             detection_prompt: Text prompt for SAM3 segmentation
+            exclude_basket: Enable basket detection and sock exclusion
             
         Returns:
-            InferenceResult with pairs data, timing info, and basket boxes
+            InferenceResult with pairs data, timing info, and basket masks
         """
         if not self._loaded:
             self.load_models()
@@ -154,7 +156,8 @@ class InferenceService:
         # Create config for this request
         config = VideoProcessorConfig(
             top_n_pairs=top_n_pairs,
-            detection_prompt=detection_prompt
+            detection_prompt=detection_prompt,
+            exclude_basket_socks=exclude_basket
         )
         
         # Run inference (now returns basket_masks as well)
@@ -202,6 +205,7 @@ class InferenceService:
         jpeg_bytes: bytes,
         top_n_pairs: int = 1,
         detection_prompt: str = "socks",
+        exclude_basket: bool = False,
         max_dimension: int = 1280
     ) -> InferenceResult:
         """
@@ -211,6 +215,7 @@ class InferenceService:
             jpeg_bytes: JPEG image as bytes
             top_n_pairs: Maximum number of pairs to detect
             detection_prompt: Text prompt for SAM3 segmentation
+            exclude_basket: Enable basket detection and sock exclusion
             max_dimension: Maximum dimension (width or height) - images larger 
                           than this will be resized to prevent OOM on CPU
             
@@ -234,7 +239,7 @@ class InferenceService:
                                    interpolation=cv2.INTER_AREA)
             print(f"Resized image from {width}x{height} to {new_width}x{new_height}")
         
-        return self.infer(frame_bgr, top_n_pairs, detection_prompt)
+        return self.infer(frame_bgr, top_n_pairs, detection_prompt, exclude_basket)
 
 
 # Singleton instance for the server

@@ -1,171 +1,140 @@
-# 🧦 Laundromat
+# 🧦 Laundromat - Sock Pair Detection
 
-**Automatic Sock Pair Detection using Computer Vision**
+Automatically detect and highlight matching sock pairs in laundry using computer vision. Uses SAM3 for segmentation and ResNet18 for feature matching.
 
-Laundromat uses SAM3 (Segment Anything Model 3) for semantic segmentation and ResNet18 for feature matching to automatically detect and highlight matching sock pairs in video streams.
+## Architecture
 
-## Features
+Laundromat uses a **client-server architecture**:
 
-- 🎯 **Semantic Segmentation**: Uses SAM3 to detect individual socks in a laundry pile
-- 🧠 **Deep Learning Matching**: ResNet18 extracts visual features for accurate pair matching
-- 📹 **Real-time Tracking**: Optical flow tracking maintains consistent pair visualization between inference frames
-- 🎨 **Color Persistence**: Matched pairs maintain consistent colors across detection refreshes
+- **Server**: Runs SAM3 + ResNet inference (GPU or CPU). Can be on localhost or a remote machine.
+- **Client**: Captures video/camera, sends frames to server, receives results, performs optical flow tracking locally.
 
-## Installation
+This separation allows running the heavy ML models on a powerful machine while the client can be a lightweight device (laptop, phone, etc.).
 
-### Prerequisites
+## Quick Start
 
-- Python 3.8+
-- CUDA-compatible GPU (recommended for real-time performance)
+### 1. Start the Server
 
-### Setup
-
-1. Clone the repository:
 ```bash
-git clone https://github.com/idofrizler/laundromat.git
-cd laundromat
+# Download SAM3 model weights (one-time setup)
+# Place sam3.pt in server/models/
+
+# Start server with Docker
+cd server
+docker-compose up -d
+
+# Check server is running
+curl http://localhost:8080/health
 ```
 
-2. Create a virtual environment:
-```bash
-python -m venv venv
-source venv/bin/activate  # On Windows: venv\Scripts\activate
-```
+### 2. Run the Client
 
-3. Install dependencies:
 ```bash
+# Install client dependencies
 pip install -r requirements.txt
+
+# Process a video file
+python main.py --server http://localhost:8080 --video laundry_pile.mp4
+
+# Or use camera
+python main.py --server http://localhost:8080 --camera 0
 ```
-
-4. Download the SAM3 model weights:
-   - Download `sam3.pt` from the Ultralytics model hub
-   - Place it in the project root directory
-
-## Usage
-
-### Video File Mode
-
-Place your video file named `laundry_pile.mp4` in the project directory, then run:
-
-```bash
-python main.py
-```
-
-Or specify a different video file:
-
-```bash
-python main.py --video my_laundry.mp4
-```
-
-Press `q` to stop processing. The output will be saved to `laundry_pairs_output.mp4`.
-
-### Interactive Camera Mode (NEW)
-
-Use your webcam for real-time sock pair detection:
-
-```bash
-python main.py --camera
-```
-
-The system will automatically detect and use the highest available resolution (up to 4K).
-
-#### Camera Options
-
-```bash
-# Use default camera at max resolution
-python main.py --camera
-
-# Use a specific camera (e.g., external webcam)
-python main.py --camera --camera-index 1
-
-# Set custom resolution
-python main.py --camera --width 1920 --height 1080
-
-# Detect multiple pairs
-python main.py --camera --pairs 3
-
-# Camera mode without recording
-python main.py --camera --no-record
-
-# Set custom FPS
-python main.py --camera --fps 60
-```
-
-### Command Line Options
-
-| Option | Short | Default | Description |
-|--------|-------|---------|-------------|
-| `--camera` | `-c` | - | Use webcam instead of video file |
-| `--video` | `-v` | `laundry_pile.mp4` | Path to video file |
-| `--camera-index` | `-i` | `0` | Camera device index |
-| `--width` | `-W` | `3840` | Preferred camera width (4K) |
-| `--height` | `-H` | `2160` | Preferred camera height (4K) |
-| `--fps` | - | `30` | Preferred camera FPS |
-| `--pairs` | `-p` | `1` | Number of pairs to detect |
-| `--refresh` | `-r` | `2.0` | Detection refresh interval (seconds) |
-| `--output` | `-o` | `laundry_pairs_output.mp4` | Output video path |
-| `--no-record` | - | - | Disable recording (camera only) |
-| `--no-preview` | - | - | Disable preview window |
-
-### Programmatic Usage
-
-```python
-from laundromat import SockPairVideoProcessor
-from laundromat.config import VideoProcessorConfig
-
-config = VideoProcessorConfig(
-    top_n_pairs=3,                    # Number of pairs to detect
-    refresh_interval_seconds=2.0,     # How often to re-run detection
-    detection_prompt="socks",         # SAM3 text prompt
-    output_path="output.mp4"
-)
-
-processor = SockPairVideoProcessor(config)
-processor.process_video("my_video.mp4")
-```
-
-### Configuration Options
-
-| Parameter | Default | Description |
-|-----------|---------|-------------|
-| `top_n_pairs` | 3 | Maximum number of pairs to detect |
-| `refresh_interval_seconds` | 2.0 | Seconds between detection refreshes |
-| `detection_prompt` | "socks" | Text prompt for SAM3 segmentation |
-| `mask_alpha` | 100 | Transparency of mask overlay (0-255) |
-| `border_width` | 3 | Width of mask border |
 
 ## Project Structure
 
 ```
 laundromat/
-├── src/
-│   └── laundromat/
-│       ├── __init__.py          # Package exports
-│       ├── config.py            # Configuration dataclasses
-│       ├── models.py            # Model loading utilities
-│       ├── inference.py         # Detection and feature extraction
-│       ├── matching.py          # Pair matching algorithms
-│       ├── tracking.py          # Optical flow tracking
-│       ├── visualization.py     # Drawing and overlay functions
-│       └── video_processor.py   # Main processing pipeline
-├── main.py                      # Entry point
-├── requirements.txt
-├── README.md
-└── .gitignore
+├── main.py                 # Client entry point
+├── requirements.txt        # Client dependencies (lightweight!)
+├── src/laundromat/         # Core client library
+│   ├── backends.py         # Server communication
+│   ├── config.py           # Configuration
+│   ├── tracking.py         # Optical flow tracking
+│   ├── video_processor.py  # Main processing pipeline
+│   └── visualization.py    # Overlay rendering
+├── server/                 # Inference server
+│   ├── Dockerfile
+│   ├── docker-compose.yml
+│   ├── app.py              # FastAPI REST API
+│   ├── inference_service.py
+│   └── requirements.txt    # Server dependencies (includes PyTorch)
+└── web-client/             # Optional browser client
+    ├── index.html
+    └── app.js
 ```
+
+## Client Usage
+
+```bash
+# Basic usage - server required
+python main.py --server http://localhost:8080 --video input.mp4
+
+# With camera
+python main.py --server http://localhost:8080 --camera 0
+
+# Options
+python main.py --server http://localhost:8080 --video input.mp4 \
+    --output output.mp4 \    # Output file (default: output.mp4)
+    --pairs 3 \              # Number of pairs to detect
+    --refresh 2.0 \          # Seconds between inference calls
+    --no-preview \           # Disable preview window
+    --no-record              # Don't save output (camera only)
+```
+
+## Server API
+
+The server exposes a REST API:
+
+- `GET /health` - Health check
+- `POST /infer` - Run inference on a frame
+  - Parameters: `top_n_pairs`, `detection_prompt`
+  - Body: multipart form with `frame` (JPEG image)
+  - Returns: JSON with masks (RLE encoded), boxes, labels, tracking points
+
+### Remote Server
+
+You can run the server on a remote machine with GPU:
+
+```bash
+# On the server machine
+cd server
+docker-compose up -d
+
+# On the client machine
+python main.py --server http://192.168.1.100:8080 --camera 0
+```
+
+## Web Client
+
+A browser-based client is available at `http://localhost:8080/client/` when the server is running. This allows using a phone camera directly.
 
 ## How It Works
 
-1. **Segmentation**: SAM3 segments individual socks from the video frame using the text prompt
-2. **Feature Extraction**: Each segmented sock is cropped and passed through ResNet18 to extract a 512-dimensional feature vector
-3. **Pair Matching**: Cosine similarity between feature vectors identifies the most similar pairs
-4. **Tracking**: Between inference frames, optical flow tracks the masks to maintain smooth visualization
-5. **Color Persistence**: When new detections arrive, they're matched to previous detections to maintain consistent coloring
+1. **Segmentation**: SAM3 segments all socks in the frame using text prompts
+2. **Feature Extraction**: ResNet18 extracts visual features from each sock
+3. **Pair Matching**: Cosine similarity finds the most similar pairs
+4. **Tracking**: Optical flow tracks socks between inference frames
+5. **Visualization**: Matching pairs are highlighted with colored overlays
+
+## Development
+
+### Client Dependencies
+
+The client is lightweight - no PyTorch required:
+- numpy, opencv-python, Pillow, requests
+
+### Server Dependencies  
+
+The server requires the full ML stack:
+- PyTorch, ultralytics (SAM3), torchvision
+
+### Building the Server
+
+```bash
+cd server
+docker-compose build
+```
 
 ## License
 
-MIT License
-
-## Contributing
-
-Contributions are welcome! Please feel free to submit a Pull Request.
+MIT

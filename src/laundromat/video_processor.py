@@ -10,8 +10,7 @@ from dataclasses import dataclass
 from typing import Optional, List, Dict, Any, Generator, Tuple
 
 from .config import VideoProcessorConfig, CameraConfig, DEFAULT_PAIR_COLORS
-from .models import load_sam3_predictor, load_resnet_feature_extractor
-from .inference import inference_worker
+from .backends import InferenceClient
 from .tracking import (
     compute_global_motion,
     track_points,
@@ -33,26 +32,57 @@ class FrameSource:
     source_name: str
 
 
+def inference_worker(
+    input_queue: queue.Queue,
+    output_queue: queue.Queue,
+    client: InferenceClient
+):
+    """
+    Worker thread for async inference via server.
+    
+    Args:
+        input_queue: Queue providing frames to process
+        output_queue: Queue to put results into
+        client: InferenceClient connected to server
+    """
+    while True:
+        frame_bgr = input_queue.get()
+        
+        if frame_bgr is None:
+            break
+        
+        try:
+            result = client.infer(frame_bgr)
+            output_queue.put((result.pairs_data, result.total_socks_detected))
+        except Exception as e:
+            print(f"Inference error: {e}")
+            output_queue.put(([], 0))
+        finally:
+            input_queue.task_done()
+
 class SockPairVideoProcessor:
     """
     Video processor for detecting and tracking sock pairs.
     
-    Uses SAM3 for semantic segmentation, ResNet18 for feature extraction,
-    and optical flow for tracking between inference frames.
+    Connects to an inference server for SAM3 segmentation,
+    and performs optical flow tracking locally between inference frames.
     """
     
-    def __init__(self, config: Optional[VideoProcessorConfig] = None):
+    def __init__(self, server_url: str, config: Optional[VideoProcessorConfig] = None,
+                 verify_ssl: bool = True):
         """
         Initialize the video processor.
         
         Args:
+            server_url: URL of the inference server (e.g., http://localhost:8080)
             config: Configuration options. Uses defaults if not provided.
+            verify_ssl: Whether to verify SSL certificates (set False for self-signed)
         """
         self.config = config or VideoProcessorConfig()
+        self.server_url = server_url
+        self.verify_ssl = verify_ssl
         
-        self.predictor = None
-        self.resnet = None
-        self.preprocess = None
+        self._client: Optional[InferenceClient] = None
         
         self._input_queue: Optional[queue.Queue] = None
         self._output_queue: Optional[queue.Queue] = None
@@ -68,18 +98,23 @@ class SockPairVideoProcessor:
         self._pending_inference: bool = False
         self._lag_transform: np.ndarray = np.eye(3)
     
-    def load_models(self):
-        """Load SAM3 and ResNet models."""
-        print("Loading SAM3 Predictor...")
-        self.predictor = load_sam3_predictor(self.config.sam3_model_path)
-        
-        print("Loading ResNet18...")
-        self.resnet, self.preprocess = load_resnet_feature_extractor()
-        
-        print("Models loaded successfully.")
+    def connect(self):
+        """Connect to the inference server."""
+        self._client = InferenceClient(
+            server_url=self.server_url,
+            config=self.config,
+            jpeg_quality=85,
+            max_dimension=1280,
+            timeout=60,
+            verify_ssl=self.verify_ssl
+        )
+        self._client.connect()
     
     def _start_worker(self):
         """Start the inference worker thread."""
+        if self._client is None:
+            self.connect()
+        
         self._input_queue = queue.Queue(maxsize=1)
         self._output_queue = queue.Queue()
         
@@ -88,10 +123,7 @@ class SockPairVideoProcessor:
             args=(
                 self._input_queue,
                 self._output_queue,
-                self.predictor,
-                self.resnet,
-                self.preprocess,
-                self.config
+                self._client
             )
         )
         self._worker_thread.daemon = True
@@ -478,8 +510,8 @@ class SockPairVideoProcessor:
             output_path: Path for output video (uses config default if None)
             show_preview: Whether to show live preview window
         """
-        if self.predictor is None:
-            self.load_models()
+        if self._client is None:
+            self.connect()
         
         output_path = output_path or self.config.output_path
         
@@ -523,8 +555,8 @@ class SockPairVideoProcessor:
             show_preview: Whether to show live preview window
             record: Whether to record the output to a file
         """
-        if self.predictor is None:
-            self.load_models()
+        if self._client is None:
+            self.connect()
         
         camera_config = camera_config or CameraConfig()
         output_path = output_path or self.config.output_path

@@ -1,0 +1,30 @@
+version: '3.8'
+
+services:
+  laundromat-server:
+    build:
+      context: ..
+      dockerfile: server/Dockerfile
+    ports:
+      - "8443:8443"   # HTTPS for phone camera access
+    volumes:
+      # Mount model weights
+      - ./models:/app/models:ro
+      # Mount SSL certificates for HTTPS
+      - ./certs:/app/certs:ro
+    environment:
+      - MODEL_PATH=/app/models/sam3.pt
+      - LOG_LEVEL=info
+      - PORT=8443
+      - SSL_KEYFILE=/app/certs/key.pem
+      - SSL_CERTFILE=/app/certs/cert.pem
+    restart: unless-stopped
+    shm_size: '4gb'
+    deploy:
+      resources:
+        limits:
+          cpus: '8'
+          memory: 16G
+        reservations:
+          cpus: '4'
+          memory: 8G

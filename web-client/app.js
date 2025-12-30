@@ -208,21 +208,16 @@ class LaundromatClient {
         this.fps = 0;
         this.lastFrameTime = 0;
         
+        // Compute server URL based on current location
+        this.serverUrl = `${location.protocol}//${location.hostname}:${location.protocol === 'https:' ? '8443' : '8080'}`;
+        
         this.bindEvents();
-        this.initServerUrl();
     }
     
     bindEvents() {
         document.getElementById('startBtn').onclick = () => this.start();
         document.getElementById('stopBtn').onclick = () => this.stop();
         this.video.onloadedmetadata = () => this.onVideoReady();
-    }
-    
-    initServerUrl() {
-        const input = document.getElementById('serverUrl');
-        input.value = localStorage.getItem('server_url') || 
-            `${location.protocol}//${location.hostname}:${location.protocol === 'https:' ? '8443' : '8080'}`;
-        input.onchange = () => localStorage.setItem('server_url', input.value);
     }
     
     async start() {
@@ -279,11 +274,10 @@ class LaundromatClient {
             
             const formData = new FormData();
             formData.append('frame', blob, 'frame.jpg');
-            const serverUrl = document.getElementById('serverUrl').value;
             const topN = document.getElementById('topNPairs').value;
 
             const response = await fetch(
-                `${serverUrl}/infer?top_n_pairs=${topN}`,
+                `${this.serverUrl}/infer?top_n_pairs=${topN}`,
                 { method: 'POST', body: formData }
             );
             

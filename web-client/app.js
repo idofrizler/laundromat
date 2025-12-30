@@ -225,7 +225,22 @@ class LaundromatClient {
         document.getElementById('startBtn').onclick = () => this.start();
         document.getElementById('stopBtn').onclick = () => this.stop();
         document.getElementById('recordBtn').onclick = () => this.toggleRecording();
+        document.getElementById('refreshInterval').onchange = () => this.updateInferenceInterval();
         this.video.onloadedmetadata = () => this.onVideoReady();
+    }
+    
+    updateInferenceInterval() {
+        // Clear existing interval
+        if (this.inferInterval) {
+            clearInterval(this.inferInterval);
+        }
+        
+        // Only restart if video is active
+        if (this.video.srcObject) {
+            const interval = parseInt(document.getElementById('refreshInterval').value) || 2;
+            console.log(`[INFER] Interval updated to ${interval}s`);
+            this.inferInterval = setInterval(() => this.runInference(), interval * 1000);
+        }
     }
     
     toggleRecording() {

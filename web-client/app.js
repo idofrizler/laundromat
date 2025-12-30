@@ -215,6 +215,7 @@ class LaundromatClient {
         this.basketMasks = [];  // Detected basket masks with pre-rendered canvases
         this.fps = 0;
         this.lastFrameTime = 0;
+        this.inferMode = 'auto';  // 'auto' or 'manual'
         
         // Compute server URL based on current location
         this.serverUrl = `${location.protocol}//${location.hostname}:${location.protocol === 'https:' ? '8443' : '8080'}`;
@@ -227,7 +228,37 @@ class LaundromatClient {
         document.getElementById('stopBtn').onclick = () => this.stop();
         document.getElementById('recordBtn').onclick = () => this.toggleRecording();
         document.getElementById('refreshInterval').onchange = () => this.updateInferenceInterval();
+        document.getElementById('inferMode').onchange = (e) => this.setInferMode(e.target.value);
         this.video.onloadedmetadata = () => this.onVideoReady();
+        
+        // Tap to detect in manual mode (on video/canvas area only, not controls)
+        document.getElementById('container').onclick = (e) => {
+            // Don't trigger if clicking on controls or other UI
+            if (e.target.closest('#ui-layer')) return;
+            if (this.inferMode === 'manual' && this.video.srcObject) {
+                this.runInference();
+            }
+        };
+    }
+    
+    setInferMode(mode) {
+        this.inferMode = mode;
+        console.log(`[MODE] Switched to ${mode} mode`);
+        
+        // Show/hide interval input based on mode
+        const intervalGroup = document.getElementById('autoIntervalGroup');
+        intervalGroup.style.display = mode === 'auto' ? 'flex' : 'none';
+        
+        // Clear or restart interval based on mode
+        if (this.inferInterval) {
+            clearInterval(this.inferInterval);
+            this.inferInterval = null;
+        }
+        
+        if (mode === 'auto' && this.video.srcObject) {
+            const interval = parseInt(document.getElementById('refreshInterval').value) || 2;
+            this.inferInterval = setInterval(() => this.runInference(), interval * 1000);
+        }
     }
     
     updateInferenceInterval() {
@@ -363,15 +394,30 @@ class LaundromatClient {
         
         this.tracker.init();
         
-        // Start Loops
-        const interval = parseInt(document.getElementById('refreshInterval').value) || 2;
-        this.inferInterval = setInterval(() => this.runInference(), interval * 1000);
+        // Start inference loop based on current mode
+        this.inferMode = document.getElementById('inferMode').value;
+        if (this.inferMode === 'auto') {
+            const interval = parseInt(document.getElementById('refreshInterval').value) || 2;
+            this.inferInterval = setInterval(() => this.runInference(), interval * 1000);
+        }
+        
+        // Start render loop
         this.render();
+    }
+    
+    showDetectingOverlay(show) {
+        const overlay = document.getElementById('detectingOverlay');
+        overlay.style.display = show ? 'flex' : 'none';
     }
     
     async runInference() {
         if (this.isProcessing) return;
         this.isProcessing = true;
+        
+        // Show overlay only in manual mode
+        if (this.inferMode === 'manual') {
+            this.showDetectingOverlay(true);
+        }
         
         try {
             // 1. Capture Frame & Sync Tracker
@@ -462,6 +508,8 @@ class LaundromatClient {
             document.getElementById('statusText').textContent = 'Error';
         } finally {
             this.isProcessing = false;
+            // Hide overlay (only visible in manual mode anyway)
+            this.showDetectingOverlay(false);
         }
     }
     

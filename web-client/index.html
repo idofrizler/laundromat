@@ -28,6 +28,9 @@
     <div id="container">
         <video id="videoElement" playsinline muted></video>
         <canvas id="overlayCanvas"></canvas>
+        <div id="detectingOverlay" style="display:none; position:absolute; top:0; left:0; width:100%; height:100%; background:rgba(0,0,0,0.5); align-items:center; justify-content:center; z-index:10;">
+            <div style="font-size:32px; color:white; text-shadow:2px 2px 4px black;">🔍 Detecting...</div>
+        </div>
         
         <div id="ui-layer">
             <div class="stats">
@@ -47,8 +50,15 @@
                     <input id="topNPairs" type="number" value="1" style="width: 40px;">
                 </div>
                 <div style="display:flex; gap:5px; align-items:center;">
+                    <label>Mode:</label>
+                    <select id="inferMode" style="padding: 6px;">
+                        <option value="auto">Auto</option>
+                        <option value="manual">Manual (tap)</option>
+                    </select>
+                </div>
+                <div id="autoIntervalGroup" style="display:flex; gap:5px; align-items:center;">
                     <label>Sec:</label>
-                    <input id="refreshInterval" type="number" value="5" style="width: 40px;">
+                    <input id="refreshInterval" type="number" value="2" style="width: 40px;">
                 </div>
             </div>
         </div>

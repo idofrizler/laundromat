@@ -42,7 +42,7 @@ def inference_worker(
     
     Args:
         input_queue: Queue providing frames to process
-        output_queue: Queue to put results into
+        output_queue: Queue to put results into (tuple of pairs_data, total_socks, basket_boxes)
         client: InferenceClient connected to server
     """
     while True:
@@ -53,10 +53,10 @@ def inference_worker(
         
         try:
             result = client.infer(frame_bgr)
-            output_queue.put((result.pairs_data, result.total_socks_detected))
+            output_queue.put((result.pairs_data, result.total_socks_detected, result.basket_boxes))
         except Exception as e:
             print(f"Inference error: {e}")
-            output_queue.put(([], 0))
+            output_queue.put(([], 0, []))
         finally:
             input_queue.task_done()
 
@@ -93,6 +93,7 @@ class SockPairVideoProcessor:
     def _reset_state(self):
         """Reset processing state between runs."""
         self._current_pairs_data: List[Dict[str, Any]] = []
+        self._current_basket_boxes: List[np.ndarray] = []
         self._total_socks_detected: int = 0
         self._prev_gray: Optional[np.ndarray] = None
         self._pending_inference: bool = False
@@ -332,8 +333,9 @@ class SockPairVideoProcessor:
         # 2. Check for inference results
         if self._pending_inference:
             try:
-                new_data, total_socks = self._output_queue.get_nowait()
+                new_data, total_socks, basket_boxes = self._output_queue.get_nowait()
                 self._total_socks_detected = total_socks
+                self._current_basket_boxes = basket_boxes
                 
                 # Apply lag compensation
                 for item in new_data:
@@ -367,7 +369,8 @@ class SockPairVideoProcessor:
             self._current_pairs_data,
             mask_alpha=self.config.mask_alpha,
             border_width=self.config.border_width,
-            total_socks_detected=self._total_socks_detected
+            total_socks_detected=self._total_socks_detected,
+            basket_boxes=self._current_basket_boxes
         )
         
         self._prev_gray = frame_gray.copy()

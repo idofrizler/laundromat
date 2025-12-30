@@ -5,12 +5,238 @@ Inference module for sock detection and feature extraction.
 import cv2
 import numpy as np
 import torch
+import logging
 from PIL import Image
-from typing import List, Dict, Any, Tuple
+from typing import List, Dict, Any, Tuple, Optional
 
 from .config import VideoProcessorConfig, DEFAULT_PAIR_COLORS
 from .matching import find_best_pairs
 from .tracking import find_tracking_points
+
+# Set up logging
+logger = logging.getLogger(__name__)
+
+
+def get_box_centroid(box: np.ndarray) -> Tuple[float, float]:
+    """
+    Get the centroid of a bounding box.
+    
+    Args:
+        box: Bounding box [x1, y1, x2, y2]
+        
+    Returns:
+        Tuple of (cx, cy) centroid coordinates
+    """
+    x1, y1, x2, y2 = box
+    return ((x1 + x2) / 2, (y1 + y2) / 2)
+
+
+def is_point_in_box(point: Tuple[float, float], box: np.ndarray) -> bool:
+    """
+    Check if a point is inside a bounding box.
+    
+    Args:
+        point: (x, y) coordinates
+        box: Bounding box [x1, y1, x2, y2]
+        
+    Returns:
+        True if point is inside the box
+    """
+    x, y = point
+    x1, y1, x2, y2 = box
+    return x1 <= x <= x2 and y1 <= y <= y2
+
+def is_point_in_mask(point: Tuple[float, float], mask: np.ndarray) -> bool:
+    """
+    Check if a point is inside a binary mask.
+    
+    Args:
+        point: (x, y) coordinates
+        mask: Binary mask (H, W)
+        
+    Returns:
+        True if point is inside the mask (mask value > 0)
+    """
+    x, y = int(round(point[0])), int(round(point[1]))
+    h, w = mask.shape[:2]
+    
+    # Check bounds
+    if x < 0 or x >= w or y < 0 or y >= h:
+        return False
+    
+    return mask[y, x] > 0
+
+
+def detect_baskets(
+    predictor,
+    frame_bgr: np.ndarray,
+    basket_prompts: List[str]
+) -> Tuple[Optional[np.ndarray], Optional[np.ndarray]]:
+    """
+    Detect laundry baskets in the frame using multiple prompts.
+    
+    Tries each prompt in order until baskets are found, then returns
+    the combined results from all successful prompts.
+    
+    Args:
+        predictor: SAM3 semantic predictor
+        frame_bgr: BGR frame
+        basket_prompts: List of text prompts for basket detection
+        
+    Returns:
+        Tuple of (masks, boxes) or (None, None) if no baskets detected
+    """
+    all_masks = []
+    all_boxes = []
+    
+    for prompt in basket_prompts:
+        logger.debug(f"Trying basket prompt: '{prompt}'")
+        
+        # Need to set the image before running inference with a new prompt
+        predictor.set_image(frame_bgr)
+        results = predictor(text=[prompt])
+        
+        if not results or results[0].masks is None or len(results[0].masks) == 0:
+            logger.debug(f"  No baskets found with prompt: '{prompt}'")
+            continue
+        
+        result = results[0]
+        masks = result.masks.data.cpu().numpy()
+        boxes = result.boxes.xyxy.cpu().numpy()
+        
+        logger.info(f"Basket detection: {len(boxes)} basket(s) found with prompt '{prompt}'")
+        for i, box in enumerate(boxes):
+            x1, y1, x2, y2 = box
+            logger.debug(f"  Basket {i+1}: box=[{x1:.0f}, {y1:.0f}, {x2:.0f}, {y2:.0f}], "
+                        f"size={x2-x1:.0f}x{y2-y1:.0f}")
+        
+        all_masks.append(masks)
+        all_boxes.append(boxes)
+        
+        # Found baskets with this prompt - stop trying more prompts
+        # (to avoid duplicates and speed up detection)
+        break
+    
+    if not all_masks:
+        logger.info(f"Basket detection: 0 baskets found (tried {len(basket_prompts)} prompts)")
+        return None, None
+    
+    # Combine results
+    combined_masks = np.concatenate(all_masks, axis=0)
+    combined_boxes = np.concatenate(all_boxes, axis=0)
+    
+    return combined_masks, combined_boxes
+
+
+def fill_mask_holes(mask: np.ndarray) -> np.ndarray:
+    """
+    Fill holes in a binary mask using contour-based hole filling.
+    
+    This is needed because the basket mask may have holes where socks
+    are visible inside the basket, but we want to treat the entire
+    basket interior as the exclusion zone.
+    
+    Args:
+        mask: Binary mask (H, W) as bool or uint8
+        
+    Returns:
+        Filled mask as bool array
+    """
+    # Convert to uint8 for OpenCV
+    if mask.dtype == bool:
+        mask_uint8 = mask.astype(np.uint8) * 255
+    else:
+        mask_uint8 = (mask > 0).astype(np.uint8) * 255
+    
+    # Find contours
+    contours, _ = cv2.findContours(mask_uint8, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+    
+    # Create filled mask by drawing filled contours
+    filled = np.zeros_like(mask_uint8)
+    cv2.drawContours(filled, contours, -1, 255, thickness=cv2.FILLED)
+    
+    return filled > 0
+
+def filter_socks_outside_baskets(
+    sock_masks: np.ndarray,
+    sock_boxes: np.ndarray,
+    basket_masks: Optional[np.ndarray]
+) -> Tuple[np.ndarray, np.ndarray, List[int]]:
+    """
+    Filter out socks whose centroids are inside any basket mask.
+    
+    The basket mask is filled (holes removed) so that socks visible
+    inside the basket are still considered "inside" the basket.
+    
+    Args:
+        sock_masks: Sock detection masks
+        sock_boxes: Sock bounding boxes
+        basket_masks: Basket detection masks (or None if no baskets)
+        
+    Returns:
+        Tuple of (filtered_masks, filtered_boxes, original_indices)
+    """
+    logger.info(f"=== SOCK FILTERING DEBUG ===")
+    logger.info(f"Input: {len(sock_masks)} socks, basket_masks: {basket_masks is not None}")
+    
+    if basket_masks is None or len(basket_masks) == 0:
+        # No baskets, return all socks
+        logger.info(f"No baskets to filter against, keeping all {len(sock_masks)} socks")
+        return sock_masks, sock_boxes, list(range(len(sock_masks)))
+    
+    logger.info(f"Basket masks shape: {basket_masks.shape}")
+    logger.info(f"Basket masks dtype: {basket_masks.dtype}, min: {basket_masks.min()}, max: {basket_masks.max()}")
+    
+    # Combine all basket masks into one for efficient checking
+    combined_basket_mask = np.any(basket_masks > 0, axis=0)
+    original_pixels = np.sum(combined_basket_mask)
+    logger.info(f"Combined basket mask shape: {combined_basket_mask.shape}")
+    logger.info(f"Combined mask has {original_pixels} True pixels out of {combined_basket_mask.size}")
+    
+    # Fill holes in the basket mask (so socks inside are still considered "inside")
+    combined_basket_mask = fill_mask_holes(combined_basket_mask)
+    filled_pixels = np.sum(combined_basket_mask)
+    logger.info(f"After hole filling: {filled_pixels} True pixels (added {filled_pixels - original_pixels} from holes)")
+    
+    filtered_indices = []
+    excluded_count = 0
+    
+    for i, sock_box in enumerate(sock_boxes):
+        sock_centroid = get_box_centroid(sock_box)
+        cx, cy = int(round(sock_centroid[0])), int(round(sock_centroid[1]))
+        
+        # Log sock info
+        x1, y1, x2, y2 = sock_box
+        logger.info(f"  Sock {i}: box=[{x1:.0f},{y1:.0f},{x2:.0f},{y2:.0f}], centroid=({cx}, {cy})")
+        
+        # Check bounds
+        h, w = combined_basket_mask.shape[:2]
+        if cx < 0 or cx >= w or cy < 0 or cy >= h:
+            logger.info(f"    -> centroid OUT OF BOUNDS (mask is {w}x{h}), keeping sock")
+            filtered_indices.append(i)
+            continue
+        
+        # Check if sock centroid is inside combined basket mask
+        mask_value = combined_basket_mask[cy, cx]
+        logger.info(f"    -> mask value at ({cx},{cy}): {mask_value}")
+        
+        if mask_value:
+            logger.info(f"    -> INSIDE basket mask, EXCLUDING from matching")
+            excluded_count += 1
+        else:
+            logger.info(f"    -> OUTSIDE basket mask, keeping for matching")
+            filtered_indices.append(i)
+    
+    logger.info(f"=== FILTERING RESULT: {len(sock_masks)} total, {excluded_count} excluded, "
+                f"{len(filtered_indices)} remaining ===")
+    
+    if len(filtered_indices) == 0:
+        return np.array([]), np.array([]), []
+    
+    filtered_masks = sock_masks[filtered_indices]
+    filtered_boxes = sock_boxes[filtered_indices]
+    
+    return filtered_masks, filtered_boxes, filtered_indices
 
 def extract_features(
     frame_rgb: np.ndarray,
@@ -86,15 +312,16 @@ def run_inference_on_frame(
     resnet: torch.nn.Module,
     preprocess,
     config: VideoProcessorConfig
-) -> Tuple[List[Dict[str, Any]], int]:
+) -> Tuple[List[Dict[str, Any]], int, List[np.ndarray]]:
     """
     Run full inference pipeline on a single frame.
     
     Performs:
-    1. Semantic segmentation using SAM3
-    2. Feature extraction using ResNet
-    3. Pair matching based on feature similarity
-    4. Preparation of tracking data
+    1. Semantic segmentation using SAM3 for socks
+    2. Basket detection and sock exclusion (if enabled)
+    3. Feature extraction using ResNet
+    4. Pair matching based on feature similarity
+    5. Preparation of tracking data
     
     Args:
         frame_bgr: BGR frame from video
@@ -104,26 +331,60 @@ def run_inference_on_frame(
         config: Video processor configuration
         
     Returns:
-        Tuple of (pairs_data list, total_socks_detected)
+        Tuple of (pairs_data list, total_socks_detected, basket_masks list)
     """
     # Convert to RGB and grayscale
     frame_rgb = cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2RGB)
     frame_gray = cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2GRAY)
     height, width = frame_bgr.shape[:2]
     
-    # Run SAM3 segmentation
+    # Detect baskets first (always, so we can show them even if no socks)
+    basket_masks_list = []
+    basket_masks_array = None
+    if config.exclude_basket_socks:
+        basket_masks_array, basket_boxes = detect_baskets(
+            predictor, frame_bgr, config.basket_prompts
+        )
+        
+        if basket_masks_array is not None and len(basket_masks_array) > 0:
+            # Combine and fill holes in basket masks for exclusion
+            combined_basket = np.any(basket_masks_array > 0, axis=0)
+            filled_basket = fill_mask_holes(combined_basket)
+            
+            # Convert filled mask to uint8 and resize to frame size for visualization
+            mask_uint8 = (filled_basket * 255).astype(np.uint8)
+            if mask_uint8.shape != (height, width):
+                mask_uint8 = cv2.resize(
+                    mask_uint8,
+                    (width, height),
+                    interpolation=cv2.INTER_NEAREST
+                )
+            basket_masks_list.append(mask_uint8)
+            logger.info(f"Basket visualization: using filled mask (no holes)")
+    
+    # Run SAM3 segmentation for socks
     predictor.set_image(frame_bgr)
     results = predictor(text=[config.detection_prompt])
     
     if not results or not results[0].masks:
-        return [], 0
+        return [], 0, basket_masks_list
     
     result = results[0]
     masks = result.masks.data.cpu().numpy()
     boxes = result.boxes.xyxy.cpu().numpy()
     
-    # Total socks detected by SAM3
+    # Total socks detected by SAM3 (before filtering)
     total_socks_detected = len(masks)
+    
+    # Filter socks inside baskets if we have baskets
+    if basket_masks_array is not None and len(basket_masks_array) > 0:
+        # Filter out socks inside basket masks
+        masks, boxes, filtered_indices = filter_socks_outside_baskets(
+            masks, boxes, basket_masks_array
+        )
+        
+        if len(masks) == 0:
+            return [], total_socks_detected, basket_masks_list
     
     # Extract features
     embeddings, valid_indices = extract_features(
@@ -131,7 +392,7 @@ def run_inference_on_frame(
     )
     
     if len(embeddings) == 0:
-        return [], total_socks_detected
+        return [], total_socks_detected, basket_masks_list
     
     # Find best pairs
     top_pairs = find_best_pairs(
@@ -180,7 +441,7 @@ def run_inference_on_frame(
                 'transform': np.eye(3)
             })
     
-    return pairs_data, total_socks_detected
+    return pairs_data, total_socks_detected, basket_masks_list
 
 def inference_worker(
     input_queue,
@@ -198,7 +459,7 @@ def inference_worker(
     
     Args:
         input_queue: Queue providing frames to process
-        output_queue: Queue to put results into (tuple of pairs_data, total_socks)
+        output_queue: Queue to put results into (tuple of pairs_data, total_socks, basket_boxes)
         predictor: SAM3 semantic predictor
         resnet: ResNet feature extractor
         preprocess: Preprocessing transform
@@ -211,12 +472,12 @@ def inference_worker(
             break
         
         try:
-            pairs_data, total_socks = run_inference_on_frame(
+            pairs_data, total_socks, basket_boxes = run_inference_on_frame(
                 frame_bgr, predictor, resnet, preprocess, config
             )
-            output_queue.put((pairs_data, total_socks))
+            output_queue.put((pairs_data, total_socks, basket_boxes))
         except Exception as e:
             print(f"Inference error: {e}")
-            output_queue.put(([], 0))
+            output_queue.put(([], 0, []))
         finally:
             input_queue.task_done()

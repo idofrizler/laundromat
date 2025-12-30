@@ -27,6 +27,7 @@ class InferenceResult:
     pairs_data: List[Dict[str, Any]]
     total_socks_detected: int
     inference_time_ms: float
+    basket_masks: List[Dict[str, Any]]  # List of RLE-encoded masks
 
 
 def encode_mask_rle(mask: np.ndarray) -> Dict[str, Any]:
@@ -143,7 +144,7 @@ class InferenceService:
             detection_prompt: Text prompt for SAM3 segmentation
             
         Returns:
-            InferenceResult with pairs data and timing info
+            InferenceResult with pairs data, timing info, and basket boxes
         """
         if not self._loaded:
             self.load_models()
@@ -156,8 +157,8 @@ class InferenceService:
             detection_prompt=detection_prompt
         )
         
-        # Run inference
-        pairs_data, total_socks = run_inference_on_frame(
+        # Run inference (now returns basket_masks as well)
+        pairs_data, total_socks, basket_masks = run_inference_on_frame(
             frame_bgr,
             self.predictor,
             self.resnet,
@@ -184,10 +185,16 @@ class InferenceService:
             }
             encoded_pairs.append(encoded_item)
         
+        # Encode basket masks as RLE for transfer
+        encoded_basket_masks = []
+        for mask in basket_masks:
+            encoded_basket_masks.append(encode_mask_rle(mask))
+        
         return InferenceResult(
             pairs_data=encoded_pairs,
             total_socks_detected=total_socks,
-            inference_time_ms=round(inference_time_ms, 2)
+            inference_time_ms=round(inference_time_ms, 2),
+            basket_masks=encoded_basket_masks
         )
     
     def infer_from_jpeg(

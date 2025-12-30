@@ -21,6 +21,7 @@ class InferenceResult:
     """Result from inference on a single frame."""
     pairs_data: List[Dict[str, Any]]
     total_socks_detected: int
+    basket_boxes: List[np.ndarray]  # List of basket bounding boxes [x1, y1, x2, y2]
 
 def decode_mask_rle(rle: Dict[str, Any]) -> np.ndarray:
     """
@@ -160,13 +161,15 @@ class InferenceClient:
         
         result = response.json()
         
+        # Calculate scale factor based on mask size vs original frame size
+        scale_factor = 1.0
+        
         # Decode masks, tracking points, and convert to internal format
         pairs_data = []
         for item in result['pairs_data']:
             mask = decode_mask_rle(item['mask_rle'])
             
             # Resize mask back to original frame size if server resized
-            scale_factor = 1.0
             if mask.shape != (original_height, original_width):
                 scale_factor = original_width / mask.shape[1]
                 mask = cv2.resize(mask, (original_width, original_height), 
@@ -193,7 +196,16 @@ class InferenceClient:
                 'points': points,  # Tracking points from server
             })
         
+        # Decode basket boxes and scale if needed
+        basket_boxes = []
+        for box_data in result.get('basket_boxes', []):
+            box = np.array(box_data)
+            if scale_factor != 1.0:
+                box = box * scale_factor
+            basket_boxes.append(box)
+        
         return InferenceResult(
             pairs_data=pairs_data,
-            total_socks_detected=result['total_socks_detected']
+            total_socks_detected=result['total_socks_detected'],
+            basket_boxes=basket_boxes
         )

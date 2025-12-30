@@ -212,6 +212,7 @@ class LaundromatClient {
         // State
         this.isProcessing = false;
         this.pairs = [];
+        this.basketMasks = [];  // Detected basket masks with pre-rendered canvases
         this.fps = 0;
         this.lastFrameTime = 0;
         
@@ -427,9 +428,30 @@ class LaundromatClient {
                 return p;
             });
             
+            // Process basket masks (RLE-encoded) with tracking
+            this.basketMasks = (result.basket_masks || []).map(maskRle => {
+                const mask = this.decodeMaskRLE(maskRle);
+                
+                // Calculate scale factors (mask coords -> video coords)
+                const scaleX = this.video.videoWidth / mask.width;
+                const scaleY = this.video.videoHeight / mask.height;
+                
+                // Generate tracking points from mask (sample points inside the mask)
+                const points = this.generateTrackingPointsFromMask(mask, scaleX, scaleY, lagShift);
+                
+                return {
+                    mask: mask,
+                    canvas: this.preRenderBasketMask(mask),
+                    points: points,
+                    offset: { x: lagShift.x, y: lagShift.y }
+                };
+            });
+            console.log(`[INFER] ${this.basketMasks.length} basket(s) detected with tracking`);
+            
             // Update UI
             document.getElementById('totalSocks').textContent = result.total_socks_detected;
             document.getElementById('pairsMatched').textContent = Math.floor(result.pairs_data.length / 2);
+            document.getElementById('basketCount').textContent = this.basketMasks.length;
             document.getElementById('inferenceTime').textContent = Math.round(result.inference_time_ms) + 'ms';
             document.getElementById('statusDot').className = 'status-dot connected';
             document.getElementById('statusText').textContent = 'Connected';
@@ -485,6 +507,50 @@ class LaundromatClient {
         pair.maskCanvas = c;
     }
     
+    preRenderBasketMask(mask) {
+        const c = document.createElement('canvas');
+        c.width = mask.width;
+        c.height = mask.height;
+        const ctx = c.getContext('2d');
+        const img = ctx.createImageData(mask.width, mask.height);
+        
+        // Soft grey with moderate transparency
+        const r = 128, g = 128, b = 128, a = 100;
+        
+        for (let i = 0; i < mask.data.length; i++) {
+            if (mask.data[i] > 0) {
+                const idx = i * 4;
+                img.data[idx] = r;
+                img.data[idx+1] = g;
+                img.data[idx+2] = b;
+                img.data[idx+3] = a;
+            }
+        }
+        ctx.putImageData(img, 0, 0);
+        return c;
+    }
+    
+    generateTrackingPointsFromMask(mask, scaleX, scaleY, lagShift) {
+        // Sample points uniformly from inside the mask for tracking
+        const points = [];
+        const maxPoints = 30;
+        const step = Math.max(5, Math.floor(Math.min(mask.width, mask.height) / 10));
+        
+        for (let y = step; y < mask.height - step && points.length < maxPoints; y += step) {
+            for (let x = step; x < mask.width - step && points.length < maxPoints; x += step) {
+                if (mask.data[y * mask.width + x] > 0) {
+                    // Scale to video coordinates and apply lag shift
+                    points.push([
+                        x * scaleX + lagShift.x,
+                        y * scaleY + lagShift.y
+                    ]);
+                }
+            }
+        }
+        
+        return points;
+    }
+    
     render() {
         this.animId = requestAnimationFrame(() => this.render());
         
@@ -501,13 +567,23 @@ class LaundromatClient {
         // 1. Update Tracker
         this.tracker.process(this.video);
         
-        // 2. Track Objects
+        // 2. Track Sock Pairs
         for (const p of this.pairs) {
             if (p.points && p.points.length) {
                 const res = this.tracker.trackPoints(p.points);
                 p.points = res.points;
                 p.offset.x += res.shift.x;
                 p.offset.y += res.shift.y;
+            }
+        }
+        
+        // 3. Track Baskets
+        for (const basket of this.basketMasks) {
+            if (basket.points && basket.points.length) {
+                const res = this.tracker.trackPoints(basket.points);
+                basket.points = res.points;
+                basket.offset.x += res.shift.x;
+                basket.offset.y += res.shift.y;
             }
         }
         
@@ -541,10 +617,57 @@ class LaundromatClient {
             this.ctx.fillText(p.label, cx, cy);
         }
         
+        // Draw basket masks with soft grey overlay and label (with tracking offset)
+        for (const basket of this.basketMasks) {
+            if (!basket.canvas) continue;
+            
+            // Calculate scale factors for this mask (mask coords -> canvas coords)
+            const scaleX = this.canvas.width / basket.mask.width;
+            const scaleY = this.canvas.height / basket.mask.height;
+            
+            // Draw the pre-rendered mask scaled to canvas size with offset
+            this.ctx.save();
+            this.ctx.translate(basket.offset.x, basket.offset.y);
+            this.ctx.drawImage(basket.canvas, 0, 0, this.canvas.width, this.canvas.height);
+            this.ctx.restore();
+            
+            // Find center of mass of the mask for label placement
+            let sumX = 0, sumY = 0, count = 0;
+            for (let y = 0; y < basket.mask.height; y++) {
+                for (let x = 0; x < basket.mask.width; x++) {
+                    if (basket.mask.data[y * basket.mask.width + x] > 0) {
+                        sumX += x;
+                        sumY += y;
+                        count++;
+                    }
+                }
+            }
+            
+            if (count > 0) {
+                // Scale center to canvas coords and add tracking offset
+                const cx = (sumX / count) * scaleX + basket.offset.x;
+                const cy = (sumY / count) * scaleY + basket.offset.y;
+                
+                // Draw "Basket" label with better visibility
+                this.ctx.font = 'bold 32px sans-serif';
+                this.ctx.textAlign = 'center';
+                this.ctx.textBaseline = 'middle';
+                
+                // Draw text shadow/outline for visibility
+                this.ctx.strokeStyle = 'white';
+                this.ctx.lineWidth = 5;
+                this.ctx.strokeText('🧺 Basket', cx, cy);
+                
+                this.ctx.fillStyle = '#404040';
+                this.ctx.fillText('🧺 Basket', cx, cy);
+            }
+        }
+        
         // FPS
         this.ctx.font = 'bold 20px monospace';
         this.ctx.fillStyle = this.fps > 20 ? '#0f0' : '#f00';
         this.ctx.textAlign = 'right';
+        this.ctx.textBaseline = 'alphabetic';
         this.ctx.fillText(this.fps.toFixed(1) + ' FPS', this.canvas.width - 10, 30);
         
         // Recording: Composite video + overlay onto record canvas

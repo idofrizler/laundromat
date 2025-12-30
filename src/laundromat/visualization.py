@@ -5,7 +5,7 @@ Visualization utilities for drawing pair overlays on frames.
 import cv2
 import numpy as np
 from PIL import Image, ImageDraw
-from typing import List, Dict, Any, Tuple
+from typing import List, Dict, Any, Tuple, Optional
 
 from .tracking import warp_mask
 
@@ -146,13 +146,61 @@ def draw_stats_overlay(
     
     return frame_bgr
 
+def draw_basket_labels(
+    frame_bgr: np.ndarray,
+    basket_boxes: List[np.ndarray]
+) -> np.ndarray:
+    """
+    Draw "Basket" text at the center of each detected basket.
+    
+    Args:
+        frame_bgr: BGR frame from OpenCV
+        basket_boxes: List of basket bounding boxes [x1, y1, x2, y2]
+        
+    Returns:
+        BGR frame with basket labels drawn
+    """
+    if not basket_boxes:
+        return frame_bgr
+    
+    result = frame_bgr.copy()
+    height, width = frame_bgr.shape[:2]
+    
+    # Calculate font scale based on frame resolution
+    font_scale = max(0.8, min(width, height) / 800)
+    thickness = max(2, int(font_scale * 2))
+    font = cv2.FONT_HERSHEY_SIMPLEX
+    
+    text = "Basket"
+    (text_width, text_height), baseline = cv2.getTextSize(text, font, font_scale, thickness)
+    
+    for box in basket_boxes:
+        x1, y1, x2, y2 = map(int, box)
+        
+        # Calculate center of basket
+        center_x = (x1 + x2) // 2
+        center_y = (y1 + y2) // 2
+        
+        # Position text centered at the basket center
+        text_x = center_x - text_width // 2
+        text_y = center_y + text_height // 2
+        
+        # Draw text with black outline for visibility
+        cv2.putText(result, text, (text_x + 2, text_y + 2), 
+                    font, font_scale, (0, 0, 0), thickness + 2)
+        cv2.putText(result, text, (text_x, text_y), 
+                    font, font_scale, (128, 128, 128), thickness)
+    
+    return result
+
 def composite_frame(
     frame_bgr: np.ndarray,
     pairs_data: List[Dict[str, Any]],
     mask_alpha: int = 100,
     border_width: int = 3,
     show_stats: bool = True,
-    total_socks_detected: int = 0
+    total_socks_detected: int = 0,
+    basket_boxes: Optional[List[np.ndarray]] = None
 ) -> np.ndarray:
     """
     Create a composited frame with pair overlays.
@@ -164,6 +212,7 @@ def composite_frame(
         border_width: Width of contour border
         show_stats: Whether to show detection statistics overlay
         total_socks_detected: Total number of socks detected by SAM3
+        basket_boxes: List of detected basket bounding boxes (optional)
         
     Returns:
         BGR frame with overlays drawn
@@ -187,6 +236,10 @@ def composite_frame(
     # Convert back to BGR
     result_rgb = np.array(result_pil.convert('RGB'))
     result_bgr = cv2.cvtColor(result_rgb, cv2.COLOR_RGB2BGR)
+    
+    # Draw basket labels
+    if basket_boxes:
+        result_bgr = draw_basket_labels(result_bgr, basket_boxes)
     
     # Add stats overlay
     if show_stats:

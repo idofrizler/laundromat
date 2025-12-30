@@ -106,6 +106,7 @@ async def infer(
     Run sock pair detection on a frame.
     
     Accepts a JPEG image and returns detected pairs with RLE-encoded masks.
+    Automatically detects laundry baskets and excludes socks inside them.
     
     **Request:**
     - `frame`: JPEG image file (multipart/form-data)
@@ -125,9 +126,14 @@ async def infer(
             ...
         ],
         "total_socks_detected": 12,
-        "inference_time_ms": 450.5
+        "inference_time_ms": 450.5,
+        "basket_boxes": [[x1, y1, x2, y2], ...]
     }
     ```
+    
+    **Notes:**
+    - Socks with centroids inside detected laundry baskets are excluded from pair matching
+    - `basket_boxes` contains bounding boxes of detected baskets (empty if none detected)
     """
     # Validate content type
     if frame.content_type not in ['image/jpeg', 'image/jpg', 'image/png']:

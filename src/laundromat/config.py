@@ -55,6 +55,17 @@ class VideoProcessorConfig:
     # Detection prompt
     detection_prompt: str = "socks"
     
+    # Basket exclusion settings
+    basket_prompts: List[str] = field(default_factory=lambda: [
+        "laundry basket",
+        "laundry hamper", 
+        "hamper",
+        "basket",
+        "clothes basket",
+        "wicker basket"
+    ])
+    exclude_basket_socks: bool = True
+    
     # Visualization settings
     mask_alpha: int = 100
     border_width: int = 3

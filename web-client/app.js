@@ -202,6 +202,13 @@ class LaundromatClient {
         this.captureCanvas = document.createElement('canvas');
         this.captureCtx = this.captureCanvas.getContext('2d', { willReadFrequently: true });
         
+        // Recording: Composite canvas (video + overlay)
+        this.recordCanvas = document.createElement('canvas');
+        this.recordCtx = this.recordCanvas.getContext('2d');
+        this.mediaRecorder = null;
+        this.recordedChunks = [];
+        this.isRecording = false;
+        
         // State
         this.isProcessing = false;
         this.pairs = [];
@@ -217,7 +224,87 @@ class LaundromatClient {
     bindEvents() {
         document.getElementById('startBtn').onclick = () => this.start();
         document.getElementById('stopBtn').onclick = () => this.stop();
+        document.getElementById('recordBtn').onclick = () => this.toggleRecording();
         this.video.onloadedmetadata = () => this.onVideoReady();
+    }
+    
+    toggleRecording() {
+        if (this.isRecording) {
+            this.stopRecording();
+        } else {
+            this.startRecording();
+        }
+    }
+    
+    startRecording() {
+        // Setup record canvas size
+        this.recordCanvas.width = this.video.videoWidth;
+        this.recordCanvas.height = this.video.videoHeight;
+        
+        // Get stream from canvas
+        const stream = this.recordCanvas.captureStream(30); // 30 FPS
+        
+        // Determine supported mime type
+        const mimeTypes = [
+            'video/webm;codecs=vp9',
+            'video/webm;codecs=vp8',
+            'video/webm',
+            'video/mp4'
+        ];
+        let mimeType = '';
+        for (const type of mimeTypes) {
+            if (MediaRecorder.isTypeSupported(type)) {
+                mimeType = type;
+                break;
+            }
+        }
+        
+        if (!mimeType) {
+            alert('No supported video format found for recording');
+            return;
+        }
+        
+        this.recordedChunks = [];
+        this.mediaRecorder = new MediaRecorder(stream, { 
+            mimeType,
+            videoBitsPerSecond: 8000000 // 8 Mbps for high quality
+        });
+        
+        this.mediaRecorder.ondataavailable = (e) => {
+            if (e.data.size > 0) {
+                this.recordedChunks.push(e.data);
+            }
+        };
+        
+        this.mediaRecorder.onstop = () => {
+            const blob = new Blob(this.recordedChunks, { type: mimeType });
+            const url = URL.createObjectURL(blob);
+            const a = document.createElement('a');
+            a.href = url;
+            a.download = `laundromat-${new Date().toISOString().slice(0,19).replace(/:/g,'-')}.webm`;
+            a.click();
+            URL.revokeObjectURL(url);
+        };
+        
+        this.mediaRecorder.start(100); // Collect data every 100ms
+        this.isRecording = true;
+        
+        const btn = document.getElementById('recordBtn');
+        btn.textContent = '⏹ Stop';
+        btn.classList.add('recording');
+        console.log('[RECORD] Started');
+    }
+    
+    stopRecording() {
+        if (this.mediaRecorder && this.mediaRecorder.state !== 'inactive') {
+            this.mediaRecorder.stop();
+        }
+        this.isRecording = false;
+        
+        const btn = document.getElementById('recordBtn');
+        btn.textContent = '⏺ Record';
+        btn.classList.remove('recording');
+        console.log('[RECORD] Stopped');
     }
     
     async start() {
@@ -229,12 +316,18 @@ class LaundromatClient {
             this.video.play();
             document.getElementById('startBtn').disabled = true;
             document.getElementById('stopBtn').disabled = false;
+            document.getElementById('recordBtn').disabled = false;
         } catch (e) {
             alert('Camera error: ' + e.message);
         }
     }
     
     stop() {
+        // Stop recording if active
+        if (this.isRecording) {
+            this.stopRecording();
+        }
+        
         if (this.video.srcObject) {
             this.video.srcObject.getTracks().forEach(t => t.stop());
             this.video.srcObject = null;
@@ -243,6 +336,7 @@ class LaundromatClient {
         cancelAnimationFrame(this.animId);
         document.getElementById('startBtn').disabled = false;
         document.getElementById('stopBtn').disabled = true;
+        document.getElementById('recordBtn').disabled = true;
     }
     
     onVideoReady() {
@@ -425,6 +519,12 @@ class LaundromatClient {
         this.ctx.fillStyle = this.fps > 20 ? '#0f0' : '#f00';
         this.ctx.textAlign = 'right';
         this.ctx.fillText(this.fps.toFixed(1) + ' FPS', this.canvas.width - 10, 30);
+        
+        // Recording: Composite video + overlay onto record canvas
+        if (this.isRecording) {
+            this.recordCtx.drawImage(this.video, 0, 0);
+            this.recordCtx.drawImage(this.canvas, 0, 0);
+        }
     }
 }
 

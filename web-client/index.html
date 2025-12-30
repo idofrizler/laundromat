@@ -16,6 +16,8 @@
         
         button { padding: 8px 16px; cursor: pointer; background: #007bff; color: white; border: none; border-radius: 4px; }
         button:disabled { background: #555; cursor: not-allowed; }
+        button.recording { background: #dc3545; animation: pulse 1s infinite; }
+        @keyframes pulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.7; } }
         input { padding: 8px; border-radius: 4px; border: 1px solid #555; background: #333; color: white; }
         
         .status-dot { display: inline-block; width: 10px; height: 10px; border-radius: 50%; background: #f00; margin-right: 5px; }
@@ -38,6 +40,7 @@
             <div class="controls">
                 <button id="startBtn">Start Camera</button>
                 <button id="stopBtn" disabled>Stop</button>
+                <button id="recordBtn" disabled>⏺ Record</button>
                 <div style="display:flex; gap:5px; align-items:center;">
                     <label>Top N:</label>
                     <input id="topNPairs" type="number" value="1" style="width: 40px;">

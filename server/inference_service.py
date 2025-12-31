@@ -11,7 +11,7 @@ import time
 import numpy as np
 import cv2
 from typing import Dict, List, Any, Tuple, Optional
-from dataclasses import dataclass, asdict
+from dataclasses import dataclass, asdict, field
 
 # Add laundromat package to path
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -19,6 +19,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from laundromat.models import load_sam3_predictor, load_resnet_feature_extractor
 from laundromat.inference import run_inference_on_frame
 from laundromat.config import VideoProcessorConfig
+from laundromat.timing import TimingContext, timed_section
 
 
 @dataclass
@@ -28,6 +29,7 @@ class InferenceResult:
     total_socks_detected: int
     inference_time_ms: float
     basket_masks: List[Dict[str, Any]]  # List of RLE-encoded masks
+    timing_breakdown: Dict[str, float] = field(default_factory=dict)  # Detailed timing per stage
 
 
 def encode_mask_rle(mask: np.ndarray) -> Dict[str, Any]:
@@ -136,7 +138,8 @@ class InferenceService:
         frame_bgr: np.ndarray,
         top_n_pairs: int = 1,
         detection_prompt: str = "socks",
-        exclude_basket: bool = False
+        exclude_basket: bool = False,
+        enable_profiling: bool = True
     ) -> InferenceResult:
         """
         Run inference on a single frame.
@@ -146,6 +149,7 @@ class InferenceService:
             top_n_pairs: Maximum number of pairs to detect
             detection_prompt: Text prompt for SAM3 segmentation
             exclude_basket: Enable basket detection and sock exclusion
+            enable_profiling: Whether to collect detailed timing breakdown
             
         Returns:
             InferenceResult with pairs data, timing info, and basket masks
@@ -153,7 +157,10 @@ class InferenceService:
         if not self._loaded:
             self.load_models()
         
-        start_time = time.time()
+        # Create timing context for profiling
+        timing = TimingContext() if enable_profiling else None
+        if timing:
+            timing.start()
         
         # Create config for this request
         config = VideoProcessorConfig(
@@ -162,45 +169,54 @@ class InferenceService:
             exclude_basket_socks=exclude_basket
         )
         
-        # Run inference (now returns basket_masks as well)
+        # Run inference with timing
         pairs_data, total_socks, basket_masks = run_inference_on_frame(
             frame_bgr,
             self.predictor,
             self.resnet,
             self.preprocess,
             config,
-            self.device
+            self.device,
+            timing=timing
         )
         
-        inference_time_ms = (time.time() - start_time) * 1000
-        
         # Encode masks and tracking points for transfer
-        encoded_pairs = []
-        for item in pairs_data:
-            # Encode tracking points if present
-            points = None
-            if item.get('points') is not None and len(item['points']) > 0:
-                points = item['points'].tolist() if hasattr(item['points'], 'tolist') else item['points']
+        with timed_section(timing, "RLE encoding"):
+            encoded_pairs = []
+            for item in pairs_data:
+                # Encode tracking points if present
+                points = None
+                if item.get('points') is not None and len(item['points']) > 0:
+                    points = item['points'].tolist() if hasattr(item['points'], 'tolist') else item['points']
+                
+                encoded_item = {
+                    'mask_rle': encode_mask_rle(item['original_mask']),
+                    'box': item['box'].tolist() if hasattr(item['box'], 'tolist') else item['box'],
+                    'label': item['label'],
+                    'color': list(item['color']),
+                    'points': points,  # Tracking points for optical flow
+                }
+                encoded_pairs.append(encoded_item)
             
-            encoded_item = {
-                'mask_rle': encode_mask_rle(item['original_mask']),
-                'box': item['box'].tolist() if hasattr(item['box'], 'tolist') else item['box'],
-                'label': item['label'],
-                'color': list(item['color']),
-                'points': points,  # Tracking points for optical flow
-            }
-            encoded_pairs.append(encoded_item)
+            # Encode basket masks as RLE for transfer
+            encoded_basket_masks = []
+            for mask in basket_masks:
+                encoded_basket_masks.append(encode_mask_rle(mask))
         
-        # Encode basket masks as RLE for transfer
-        encoded_basket_masks = []
-        for mask in basket_masks:
-            encoded_basket_masks.append(encode_mask_rle(mask))
+        # Get timing breakdown
+        timing_breakdown = timing.to_dict() if timing else {}
+        inference_time_ms = timing.total_ms if timing else 0.0
+        
+        # Print timing summary for server logs
+        if timing:
+            timing.print_summary("Server Inference Timing")
         
         return InferenceResult(
             pairs_data=encoded_pairs,
             total_socks_detected=total_socks,
             inference_time_ms=round(inference_time_ms, 2),
-            basket_masks=encoded_basket_masks
+            basket_masks=encoded_basket_masks,
+            timing_breakdown=timing_breakdown
         )
     
     def infer_from_jpeg(
@@ -209,7 +225,8 @@ class InferenceService:
         top_n_pairs: int = 1,
         detection_prompt: str = "socks",
         exclude_basket: bool = False,
-        max_dimension: int = 1280
+        max_dimension: int = 1280,
+        enable_profiling: bool = True
     ) -> InferenceResult:
         """
         Run inference on a JPEG-encoded frame.
@@ -221,28 +238,98 @@ class InferenceService:
             exclude_basket: Enable basket detection and sock exclusion
             max_dimension: Maximum dimension (width or height) - images larger 
                           than this will be resized to prevent OOM on CPU
+            enable_profiling: Whether to collect detailed timing breakdown
             
         Returns:
             InferenceResult with pairs data and timing info
         """
+        if not self._loaded:
+            self.load_models()
+        
+        # Create timing context for full pipeline profiling
+        timing = TimingContext() if enable_profiling else None
+        if timing:
+            timing.start()
+        
         # Decode JPEG
-        nparr = np.frombuffer(jpeg_bytes, np.uint8)
-        frame_bgr = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
+        with timed_section(timing, "JPEG decode"):
+            nparr = np.frombuffer(jpeg_bytes, np.uint8)
+            frame_bgr = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
         
         if frame_bgr is None:
             raise ValueError("Failed to decode JPEG image")
         
         # Resize if image is too large (prevents OOM on CPU)
         height, width = frame_bgr.shape[:2]
+        resized = False
         if max(height, width) > max_dimension:
-            scale = max_dimension / max(height, width)
-            new_width = int(width * scale)
-            new_height = int(height * scale)
-            frame_bgr = cv2.resize(frame_bgr, (new_width, new_height), 
-                                   interpolation=cv2.INTER_AREA)
-            print(f"Resized image from {width}x{height} to {new_width}x{new_height}")
+            with timed_section(timing, "Image resize", f"{width}x{height} -> "):
+                scale = max_dimension / max(height, width)
+                new_width = int(width * scale)
+                new_height = int(height * scale)
+                frame_bgr = cv2.resize(frame_bgr, (new_width, new_height), 
+                                       interpolation=cv2.INTER_AREA)
+                resized = True
+            # Update the details after resize
+            if timing and timing.stages:
+                timing.stages[-1].details = f"{width}x{height} -> {new_width}x{new_height}"
         
-        return self.infer(frame_bgr, top_n_pairs, detection_prompt, exclude_basket)
+        # Create config for this request
+        config = VideoProcessorConfig(
+            top_n_pairs=top_n_pairs,
+            detection_prompt=detection_prompt,
+            exclude_basket_socks=exclude_basket
+        )
+        
+        # Run inference with timing
+        pairs_data, total_socks, basket_masks = run_inference_on_frame(
+            frame_bgr,
+            self.predictor,
+            self.resnet,
+            self.preprocess,
+            config,
+            self.device,
+            timing=timing
+        )
+        
+        # Encode masks and tracking points for transfer
+        with timed_section(timing, "RLE encoding"):
+            encoded_pairs = []
+            for item in pairs_data:
+                # Encode tracking points if present
+                points = None
+                if item.get('points') is not None and len(item['points']) > 0:
+                    points = item['points'].tolist() if hasattr(item['points'], 'tolist') else item['points']
+                
+                encoded_item = {
+                    'mask_rle': encode_mask_rle(item['original_mask']),
+                    'box': item['box'].tolist() if hasattr(item['box'], 'tolist') else item['box'],
+                    'label': item['label'],
+                    'color': list(item['color']),
+                    'points': points,  # Tracking points for optical flow
+                }
+                encoded_pairs.append(encoded_item)
+            
+            # Encode basket masks as RLE for transfer
+            encoded_basket_masks = []
+            for mask in basket_masks:
+                encoded_basket_masks.append(encode_mask_rle(mask))
+        
+        # Get timing breakdown
+        timing_breakdown = timing.to_dict() if timing else {}
+        inference_time_ms = timing.total_ms if timing else 0.0
+        
+        # Print timing summary for server logs
+        if timing:
+            timing.print_summary("Server Inference Timing (from JPEG)")
+        
+        return InferenceResult(
+            pairs_data=encoded_pairs,
+            total_socks_detected=total_socks,
+            inference_time_ms=round(inference_time_ms, 2),
+            basket_masks=encoded_basket_masks,
+            timing_breakdown=timing_breakdown
+        )
 
 
 # Singleton instance for the server

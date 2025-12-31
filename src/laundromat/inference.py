@@ -12,6 +12,7 @@ from typing import List, Dict, Any, Tuple, Optional
 from .config import VideoProcessorConfig, DEFAULT_PAIR_COLORS
 from .matching import find_best_pairs
 from .tracking import find_tracking_points
+from .timing import TimingContext, timed_section
 
 # Set up logging
 logger = logging.getLogger(__name__)
@@ -231,6 +232,9 @@ def extract_features(
     """
     Extract ResNet feature embeddings for each detected object.
     
+    Uses batched inference for efficiency - all crops are processed
+    in a single forward pass through the network.
+    
     Args:
         frame_rgb: RGB frame
         masks: Detection masks from SAM3
@@ -247,7 +251,8 @@ def extract_features(
     if device is None:
         device = torch.device("cpu")
     
-    embeddings = []
+    # First pass: prepare all crops
+    crops = []
     valid_indices = []
     
     for i, box in enumerate(boxes):
@@ -276,20 +281,27 @@ def extract_features(
         # Apply mask (zero out background)
         img_crop[~mask_crop] = 0
         
-        # Extract ResNet embedding
-        img_crop_pil = Image.fromarray(img_crop)
-        input_tensor = preprocess(img_crop_pil).unsqueeze(0).to(device)
-        
-        with torch.no_grad():
-            embedding = resnet(input_tensor).flatten().cpu().numpy()
-        
-        embeddings.append(embedding)
+        crops.append(img_crop)
         valid_indices.append(i)
     
-    if len(embeddings) == 0:
+    if len(crops) == 0:
         return np.array([]), []
     
-    return np.array(embeddings), valid_indices
+    # Batch preprocessing: convert all crops to tensors
+    batch_tensors = []
+    for crop in crops:
+        img_pil = Image.fromarray(crop)
+        tensor = preprocess(img_pil)
+        batch_tensors.append(tensor)
+    
+    # Stack into a single batch tensor
+    batch = torch.stack(batch_tensors).to(device)
+    
+    # Single batched forward pass through ResNet
+    with torch.no_grad():
+        embeddings = resnet(batch).cpu().numpy()
+    
+    return embeddings, valid_indices
 
 def run_inference_on_frame(
     frame_bgr: np.ndarray,
@@ -297,7 +309,8 @@ def run_inference_on_frame(
     resnet: torch.nn.Module,
     preprocess,
     config: VideoProcessorConfig,
-    device: torch.device = None
+    device: torch.device = None,
+    timing: Optional[TimingContext] = None
 ) -> Tuple[List[Dict[str, Any]], int, List[np.ndarray]]:
     """
     Run full inference pipeline on a single frame.
@@ -316,117 +329,130 @@ def run_inference_on_frame(
         preprocess: Preprocessing transform
         config: Video processor configuration
         device: Device to run ResNet inference on (if None, uses CPU)
+        timing: Optional TimingContext for profiling
         
     Returns:
         Tuple of (pairs_data list, total_socks_detected, basket_masks list)
     """
-    # Convert to RGB and grayscale
-    frame_rgb = cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2RGB)
-    frame_gray = cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2GRAY)
     height, width = frame_bgr.shape[:2]
+    
+    # Convert to RGB and grayscale
+    with timed_section(timing, "Color conversion"):
+        frame_rgb = cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2RGB)
+        frame_gray = cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2GRAY)
     
     # Detect baskets first (always, so we can show them even if no socks)
     basket_masks_list = []
     basket_masks_array = None
     if config.exclude_basket_socks:
-        basket_masks_array, basket_boxes = detect_baskets(
-            predictor, frame_bgr, config.basket_prompt
-        )
+        with timed_section(timing, "SAM3 basket detection"):
+            basket_masks_array, basket_boxes = detect_baskets(
+                predictor, frame_bgr, config.basket_prompt
+            )
         
         if basket_masks_array is not None and len(basket_masks_array) > 0:
-            # Combine and fill holes in basket masks for exclusion
-            combined_basket = np.any(basket_masks_array > 0, axis=0)
-            filled_basket = fill_mask_holes(combined_basket)
-            
-            # Convert filled mask to uint8 and resize to frame size for visualization
-            mask_uint8 = (filled_basket * 255).astype(np.uint8)
-            if mask_uint8.shape != (height, width):
-                mask_uint8 = cv2.resize(
-                    mask_uint8,
-                    (width, height),
-                    interpolation=cv2.INTER_NEAREST
-                )
-            basket_masks_list.append(mask_uint8)
+            with timed_section(timing, "Basket mask processing"):
+                # Combine and fill holes in basket masks for exclusion
+                combined_basket = np.any(basket_masks_array > 0, axis=0)
+                filled_basket = fill_mask_holes(combined_basket)
+                
+                # Convert filled mask to uint8 and resize to frame size for visualization
+                mask_uint8 = (filled_basket * 255).astype(np.uint8)
+                if mask_uint8.shape != (height, width):
+                    mask_uint8 = cv2.resize(
+                        mask_uint8,
+                        (width, height),
+                        interpolation=cv2.INTER_NEAREST
+                    )
+                basket_masks_list.append(mask_uint8)
             logger.info(f"Basket visualization: using filled mask (no holes)")
     
     # Run SAM3 segmentation for socks
-    predictor.set_image(frame_bgr)
-    results = predictor(text=[config.detection_prompt])
+    with timed_section(timing, "SAM3 set_image"):
+        predictor.set_image(frame_bgr)
+    
+    with timed_section(timing, "SAM3 sock inference"):
+        results = predictor(text=[config.detection_prompt])
     
     if not results or not results[0].masks:
         return [], 0, basket_masks_list
     
-    result = results[0]
-    masks = result.masks.data.cpu().numpy()
-    boxes = result.boxes.xyxy.cpu().numpy()
+    with timed_section(timing, "SAM3 result extraction"):
+        result = results[0]
+        masks = result.masks.data.cpu().numpy()
+        boxes = result.boxes.xyxy.cpu().numpy()
     
     # Total socks detected by SAM3 (before filtering)
     total_socks_detected = len(masks)
     
     # Filter socks inside baskets if we have baskets
     if basket_masks_array is not None and len(basket_masks_array) > 0:
-        # Filter out socks inside basket masks
-        masks, boxes, filtered_indices = filter_socks_outside_baskets(
-            masks, boxes, basket_masks_array
-        )
+        with timed_section(timing, "Basket filtering", f"{len(masks)} socks"):
+            # Filter out socks inside basket masks
+            masks, boxes, filtered_indices = filter_socks_outside_baskets(
+                masks, boxes, basket_masks_array
+            )
         
         if len(masks) == 0:
             return [], total_socks_detected, basket_masks_list
     
     # Extract features
-    embeddings, valid_indices = extract_features(
-        frame_rgb, masks, boxes, resnet, preprocess, height, width, device
-    )
+    with timed_section(timing, "ResNet feature extraction", f"{len(masks)} socks"):
+        embeddings, valid_indices = extract_features(
+            frame_rgb, masks, boxes, resnet, preprocess, height, width, device
+        )
     
     if len(embeddings) == 0:
         return [], total_socks_detected, basket_masks_list
     
     # Find best pairs
-    top_pairs = find_best_pairs(
-        embeddings=embeddings,
-        boxes=boxes,
-        valid_indices=valid_indices,
-        top_n=config.top_n_pairs,
-        iou_threshold=config.iou_threshold
-    )
+    with timed_section(timing, "Pair matching"):
+        top_pairs = find_best_pairs(
+            embeddings=embeddings,
+            boxes=boxes,
+            valid_indices=valid_indices,
+            top_n=config.top_n_pairs,
+            iou_threshold=config.iou_threshold
+        )
     
     # Prepare tracking data
-    pairs_data = []
-    colors = config.colors
-    
-    for pair_idx, (i, j) in enumerate(top_pairs):
-        draw_color = colors[pair_idx % len(colors)]
-        pair_label = str(pair_idx + 1)
+    with timed_section(timing, "Tracking points", f"{len(top_pairs)} pairs"):
+        pairs_data = []
+        colors = config.colors
         
-        for idx in [i, j]:
-            mask = masks[idx]
-            mask_uint8 = (mask * 255).astype(np.uint8)
+        for pair_idx, (i, j) in enumerate(top_pairs):
+            draw_color = colors[pair_idx % len(colors)]
+            pair_label = str(pair_idx + 1)
             
-            # Ensure mask is correct size
-            if mask_uint8.shape != (height, width):
-                mask_uint8 = cv2.resize(
+            for idx in [i, j]:
+                mask = masks[idx]
+                mask_uint8 = (mask * 255).astype(np.uint8)
+                
+                # Ensure mask is correct size
+                if mask_uint8.shape != (height, width):
+                    mask_uint8 = cv2.resize(
+                        mask_uint8,
+                        (width, height),
+                        interpolation=cv2.INTER_NEAREST
+                    )
+                
+                # Find tracking points
+                tracking_points = find_tracking_points(
+                    frame_gray,
                     mask_uint8,
-                    (width, height),
-                    interpolation=cv2.INTER_NEAREST
+                    max_corners=config.mask_max_corners,
+                    quality_level=config.mask_quality_level,
+                    min_distance=config.mask_min_distance
                 )
-            
-            # Find tracking points
-            tracking_points = find_tracking_points(
-                frame_gray,
-                mask_uint8,
-                max_corners=config.mask_max_corners,
-                quality_level=config.mask_quality_level,
-                min_distance=config.mask_min_distance
-            )
-            
-            pairs_data.append({
-                'original_mask': mask_uint8,
-                'box': boxes[idx],
-                'points': tracking_points,
-                'label': pair_label,
-                'color': (draw_color[0], draw_color[1], draw_color[2], 255),
-                'transform': np.eye(3)
-            })
+                
+                pairs_data.append({
+                    'original_mask': mask_uint8,
+                    'box': boxes[idx],
+                    'points': tracking_points,
+                    'label': pair_label,
+                    'color': (draw_color[0], draw_color[1], draw_color[2], 255),
+                    'transform': np.eye(3)
+                })
     
     return pairs_data, total_socks_detected, basket_masks_list
 

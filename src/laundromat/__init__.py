@@ -10,6 +10,7 @@ __version__ = "0.2.0"
 from .video_processor import SockPairVideoProcessor
 from .models import load_sam3_predictor, load_resnet_feature_extractor, get_device
 from .config import VideoProcessorConfig, CameraConfig
+from .timing import TimingContext, timed_section, Timer, profiling_enabled
 
 __all__ = [
     "SockPairVideoProcessor",
@@ -18,4 +19,9 @@ __all__ = [
     "load_sam3_predictor",
     "load_resnet_feature_extractor",
     "get_device",
+    # Profiling utilities
+    "TimingContext",
+    "timed_section",
+    "Timer",
+    "profiling_enabled",
 ]

@@ -129,13 +129,24 @@ async def infer(
         ],
         "total_socks_detected": 12,
         "inference_time_ms": 450.5,
-        "basket_masks": [{"counts": [...], "size": [H, W]}, ...]
+        "basket_masks": [{"counts": [...], "size": [H, W]}, ...],
+        "timing_breakdown": {
+            "jpeg_decode": 2.1,
+            "color_conversion": 0.5,
+            "sam3_set_image": 45.2,
+            "sam3_sock_inference": 312.4,
+            "resnet_feature_extraction": 89.7,
+            "pair_matching": 1.2,
+            "rle_encoding": 3.4,
+            "total_ms": 450.5
+        }
     }
     ```
     
     **Notes:**
     - When exclude_basket=true, socks with centroids inside detected laundry baskets are excluded from pair matching
     - `basket_masks` contains RLE-encoded masks of detected baskets (empty if none detected or exclude_basket=false)
+    - `timing_breakdown` contains per-stage timing in milliseconds for performance profiling
     """
     # Validate content type
     if frame.content_type not in ['image/jpeg', 'image/jpg', 'image/png']:

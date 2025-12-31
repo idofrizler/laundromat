@@ -57,8 +57,9 @@ class VideoProcessorConfig:
     
     # Basket exclusion settings - single prompt for efficiency (one SAM3 call)
     # Use "or" to cover different basket types
+    # NOTE: Disabled by default for performance - basket detection adds ~700ms
     basket_prompt: str = "laundry basket or hamper or wicker basket or clothes basket"
-    exclude_basket_socks: bool = True
+    exclude_basket_socks: bool = False
     
     # Visualization settings
     mask_alpha: int = 100

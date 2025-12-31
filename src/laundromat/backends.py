@@ -5,10 +5,11 @@ The client always connects to a server for inference.
 The server can run on localhost or a remote machine.
 """
 
+import time
 import cv2
 import numpy as np
-from dataclasses import dataclass
-from typing import List, Dict, Any
+from dataclasses import dataclass, field
+from typing import List, Dict, Any, Optional
 
 try:
     import requests
@@ -22,6 +23,12 @@ class InferenceResult:
     pairs_data: List[Dict[str, Any]]
     total_socks_detected: int
     basket_boxes: List[np.ndarray]  # List of basket bounding boxes [x1, y1, x2, y2]
+    # Client-side timing (ms)
+    client_jpeg_encode_ms: float = 0.0
+    client_network_ms: float = 0.0
+    client_decode_ms: float = 0.0
+    # Server-side timing breakdown (from server response)
+    server_timing: Dict[str, float] = field(default_factory=dict)
 
 def decode_mask_rle(rle: Dict[str, Any]) -> np.ndarray:
     """
@@ -113,15 +120,16 @@ class InferenceClient:
         self._session = None
         self._connected = False
     
-    def infer(self, frame_bgr: np.ndarray) -> InferenceResult:
+    def infer(self, frame_bgr: np.ndarray, print_timing: bool = False) -> InferenceResult:
         """
         Send frame to server for inference.
         
         Args:
             frame_bgr: BGR frame from OpenCV
+            print_timing: Whether to print timing summary to console
             
         Returns:
-            InferenceResult with pairs_data and total_socks_detected
+            InferenceResult with pairs_data, timing info, and detection results
         """
         if not self._connected:
             self.connect()
@@ -137,9 +145,11 @@ class InferenceClient:
             frame_to_send = cv2.resize(frame_bgr, (new_width, new_height),
                                        interpolation=cv2.INTER_AREA)
         
-        # Encode as JPEG
+        # Time: JPEG encoding
+        t0 = time.perf_counter()
         encode_params = [cv2.IMWRITE_JPEG_QUALITY, self.jpeg_quality]
         _, jpeg_bytes = cv2.imencode('.jpg', frame_to_send, encode_params)
+        jpeg_encode_ms = (time.perf_counter() - t0) * 1000
         
         # Build request params
         params = {}
@@ -147,7 +157,8 @@ class InferenceClient:
             params['top_n_pairs'] = self.config.top_n_pairs
             params['detection_prompt'] = self.config.detection_prompt
         
-        # Send to server
+        # Time: Network request (includes server processing)
+        t0 = time.perf_counter()
         response = self._session.post(
             f"{self.server_url}/infer",
             params=params,
@@ -158,8 +169,11 @@ class InferenceClient:
             verify=self.verify_ssl
         )
         response.raise_for_status()
-        
         result = response.json()
+        network_ms = (time.perf_counter() - t0) * 1000
+        
+        # Time: Decode response (RLE masks, etc.)
+        t0 = time.perf_counter()
         
         # Calculate scale factor based on mask size vs original frame size
         scale_factor = 1.0
@@ -204,8 +218,30 @@ class InferenceClient:
                 box = box * scale_factor
             basket_boxes.append(box)
         
+        decode_ms = (time.perf_counter() - t0) * 1000
+        
+        # Get server timing from response
+        server_timing = result.get('timing_breakdown', {})
+        
+        # Print timing summary if requested
+        if print_timing:
+            print(f"\n[Client-Server Inference Timing]")
+            print(f"  Client JPEG encode:.... {jpeg_encode_ms:>8.2f} ms")
+            print(f"  Network round-trip:.... {network_ms:>8.2f} ms")
+            if server_timing:
+                server_total = server_timing.get('total_ms', 0)
+                print(f"    (Server processing:.. {server_total:>8.2f} ms)")
+            print(f"  Client decode:......... {decode_ms:>8.2f} ms")
+            print(f"  {'-' * 40}")
+            total = jpeg_encode_ms + network_ms + decode_ms
+            print(f"  TOTAL:................. {total:>8.2f} ms\n")
+        
         return InferenceResult(
             pairs_data=pairs_data,
             total_socks_detected=result['total_socks_detected'],
-            basket_boxes=basket_boxes
+            basket_boxes=basket_boxes,
+            client_jpeg_encode_ms=jpeg_encode_ms,
+            client_network_ms=network_ms,
+            client_decode_ms=decode_ms,
+            server_timing=server_timing
         )

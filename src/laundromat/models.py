@@ -42,14 +42,14 @@ def load_sam3_predictor(model_path: str = DEFAULT_SAM3_MODEL_PATH) -> SAM3Semant
 
 def load_resnet_feature_extractor() -> Tuple[torch.nn.Module, Any]:
     """
-    Load ResNet18 as a feature extractor (without the final classification layer).
+    Load ResNet50 as a feature extractor (without the final classification layer).
     
     Returns:
         Tuple of (model, preprocess_transform):
-            - model: ResNet18 with identity FC layer for feature extraction
+            - model: ResNet50 with identity FC layer for feature extraction
             - preprocess_transform: Torchvision transform for input preprocessing
     """
-    resnet = models.resnet18(weights=models.ResNet18_Weights.DEFAULT)
+    resnet = models.resnet50(weights=models.ResNet50_Weights.DEFAULT)
     
     # Replace final FC layer with identity to get features
     resnet.fc = torch.nn.Identity()

@@ -29,12 +29,13 @@ def get_device() -> torch.device:
         return torch.device("cpu")
 
 
-def load_sam3_predictor(model_path: str = DEFAULT_SAM3_MODEL_PATH) -> SAM3SemanticPredictor:
+def load_sam3_predictor(model_path: str = DEFAULT_SAM3_MODEL_PATH, device: torch.device = None) -> SAM3SemanticPredictor:
     """
     Load and configure the SAM3 semantic predictor.
     
     Args:
         model_path: Path to the SAM3 model weights file.
+        device: Optional device to use. If None, auto-detects best available (CUDA > MPS > CPU).
         
     Returns:
         Configured SAM3SemanticPredictor instance.
@@ -48,9 +49,19 @@ def load_sam3_predictor(model_path: str = DEFAULT_SAM3_MODEL_PATH) -> SAM3Semant
             f"Please download sam3.pt and place it in the project directory."
         )
     
+    # Auto-detect best device if not specified
+    if device is None:
+        device = get_device()
+    
+    # Convert device to string for ultralytics config
+    device_str = str(device)
+    
+    print(f"Loading SAM3 on device: {device_str}")
+    
     overrides = {
         **SAM3_CONFIG,
         "model": model_path,
+        "device": device_str,  # Enable GPU/MPS acceleration!
     }
     
     predictor = SAM3SemanticPredictor(overrides=overrides)

@@ -109,6 +109,7 @@ class InferenceService:
         self.predictor = None
         self.resnet = None
         self.preprocess = None
+        self.device = None
         self._loaded = False
     
     def load_models(self):
@@ -119,8 +120,9 @@ class InferenceService:
         print(f"Loading SAM3 from {self.model_path}...")
         self.predictor = load_sam3_predictor(self.model_path)
         
-        print("Loading ResNet18...")
-        self.resnet, self.preprocess = load_resnet_feature_extractor()
+        print("Loading ResNet50...")
+        self.resnet, self.preprocess, self.device = load_resnet_feature_extractor()
+        print(f"ResNet50 loaded on device: {self.device}")
         
         self._loaded = True
         print("Models loaded successfully.")
@@ -166,7 +168,8 @@ class InferenceService:
             self.predictor,
             self.resnet,
             self.preprocess,
-            config
+            config,
+            self.device
         )
         
         inference_time_ms = (time.time() - start_time) * 1000

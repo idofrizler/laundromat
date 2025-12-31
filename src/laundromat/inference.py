@@ -225,7 +225,8 @@ def extract_features(
     resnet: torch.nn.Module,
     preprocess,
     height: int,
-    width: int
+    width: int,
+    device: torch.device = None
 ) -> Tuple[np.ndarray, List[int]]:
     """
     Extract ResNet feature embeddings for each detected object.
@@ -238,10 +239,14 @@ def extract_features(
         preprocess: Preprocessing transform for ResNet
         height: Frame height
         width: Frame width
+        device: Device to run inference on (if None, uses CPU)
         
     Returns:
         Tuple of (embeddings array, valid_indices list)
     """
+    if device is None:
+        device = torch.device("cpu")
+    
     embeddings = []
     valid_indices = []
     
@@ -273,10 +278,10 @@ def extract_features(
         
         # Extract ResNet embedding
         img_crop_pil = Image.fromarray(img_crop)
-        input_tensor = preprocess(img_crop_pil).unsqueeze(0)
+        input_tensor = preprocess(img_crop_pil).unsqueeze(0).to(device)
         
         with torch.no_grad():
-            embedding = resnet(input_tensor).flatten().numpy()
+            embedding = resnet(input_tensor).flatten().cpu().numpy()
         
         embeddings.append(embedding)
         valid_indices.append(i)
@@ -291,7 +296,8 @@ def run_inference_on_frame(
     predictor,
     resnet: torch.nn.Module,
     preprocess,
-    config: VideoProcessorConfig
+    config: VideoProcessorConfig,
+    device: torch.device = None
 ) -> Tuple[List[Dict[str, Any]], int, List[np.ndarray]]:
     """
     Run full inference pipeline on a single frame.
@@ -309,6 +315,7 @@ def run_inference_on_frame(
         resnet: ResNet feature extractor
         preprocess: Preprocessing transform
         config: Video processor configuration
+        device: Device to run ResNet inference on (if None, uses CPU)
         
     Returns:
         Tuple of (pairs_data list, total_socks_detected, basket_masks list)
@@ -368,7 +375,7 @@ def run_inference_on_frame(
     
     # Extract features
     embeddings, valid_indices = extract_features(
-        frame_rgb, masks, boxes, resnet, preprocess, height, width
+        frame_rgb, masks, boxes, resnet, preprocess, height, width, device
     )
     
     if len(embeddings) == 0:
@@ -429,7 +436,8 @@ def inference_worker(
     predictor,
     resnet: torch.nn.Module,
     preprocess,
-    config: VideoProcessorConfig
+    config: VideoProcessorConfig,
+    device: torch.device = None
 ):
     """
     Worker function for threaded inference.
@@ -444,6 +452,7 @@ def inference_worker(
         resnet: ResNet feature extractor
         preprocess: Preprocessing transform
         config: Video processor configuration
+        device: Device to run ResNet inference on
     """
     while True:
         frame_bgr = input_queue.get()
@@ -453,7 +462,7 @@ def inference_worker(
         
         try:
             pairs_data, total_socks, basket_boxes = run_inference_on_frame(
-                frame_bgr, predictor, resnet, preprocess, config
+                frame_bgr, predictor, resnet, preprocess, config, device
             )
             output_queue.put((pairs_data, total_socks, basket_boxes))
         except Exception as e:

@@ -23,19 +23,22 @@ def get_box_centroid(box: np.ndarray) -> Tuple[float, float]:
     return ((x1 + x2) / 2, (y1 + y2) / 2)
 
 
-def sort_socks_by_x_position(boxes: np.ndarray) -> List[int]:
+def sort_socks_by_y_position(boxes: np.ndarray) -> List[int]:
     """
-    Sort sock indices by their x-position (left to right).
+    Sort sock indices by their y-position (top to bottom).
+    
+    For top-down images where socks are arranged in a vertical line,
+    we sort by the Y-coordinate of the centroid.
     
     Args:
         boxes: Array of bounding boxes [N, 4] where each box is [x1, y1, x2, y2]
         
     Returns:
-        List of indices sorted by x-centroid (position 0 = leftmost sock)
+        List of indices sorted by y-centroid (position 0 = topmost sock)
     """
     centroids = [get_box_centroid(box) for box in boxes]
-    # Sort by x-coordinate
-    sorted_indices = sorted(range(len(centroids)), key=lambda i: centroids[i][0])
+    # Sort by y-coordinate (top to bottom)
+    sorted_indices = sorted(range(len(centroids)), key=lambda i: centroids[i][1])
     return sorted_indices
 
 
@@ -103,6 +106,81 @@ def normalize_pairs(pairs: List[Tuple[int, int]]) -> Set[Tuple[int, int]]:
         Set of normalized (pos1, pos2) tuples where pos1 < pos2
     """
     return {(min(p[0], p[1]), max(p[0], p[1])) for p in pairs}
+
+def get_relative_pair_positions(
+    detected_pairs: List[Tuple[int, int]],
+    boxes: np.ndarray
+) -> List[Tuple[int, int]]:
+    """
+    Get the relative positions of paired socks within the paired set only.
+    
+    This function:
+    1. Collects all sock indices that are part of the detected pairs
+    2. Sorts them by y-position (top to bottom for top-down images)
+    3. Returns pairs as relative positions (1-10) within the paired socks only
+    
+    This allows testing pair ordering even when extra socks are detected.
+    
+    Args:
+        detected_pairs: List of (idx1, idx2) pairs from matching algorithm
+        boxes: All bounding boxes
+        
+    Returns:
+        List of (rel_pos1, rel_pos2) tuples where positions are 1-indexed
+        and represent order within only the paired socks
+    """
+    # Collect all unique indices from pairs
+    paired_indices = set()
+    for idx1, idx2 in detected_pairs:
+        paired_indices.add(idx1)
+        paired_indices.add(idx2)
+    
+    paired_indices = list(paired_indices)
+    
+    # Sort paired indices by y-position (top to bottom)
+    centroids = {idx: get_box_centroid(boxes[idx]) for idx in paired_indices}
+    sorted_paired_indices = sorted(paired_indices, key=lambda i: centroids[i][1])
+    
+    # Create mapping: global_idx -> relative position (1-indexed)
+    idx_to_rel_pos = {idx: pos + 1 for pos, idx in enumerate(sorted_paired_indices)}
+    
+    # Map pairs to relative positions
+    relative_pairs = []
+    for idx1, idx2 in detected_pairs:
+        pos1 = idx_to_rel_pos[idx1]
+        pos2 = idx_to_rel_pos[idx2]
+        # Normalize so smaller position comes first
+        relative_pairs.append((min(pos1, pos2), max(pos1, pos2)))
+    
+    return relative_pairs
+
+def check_pair_ordering(
+    relative_pairs: List[Tuple[int, int]],
+    folder_type: str
+) -> Tuple[bool, str]:
+    """
+    Check if the relative pair ordering matches the expected pattern.
+    
+    Args:
+        relative_pairs: List of (rel_pos1, rel_pos2) tuples (1-indexed, normalized)
+        folder_type: Either 'straight_line' or 'outside_in'
+        
+    Returns:
+        Tuple of (is_correct, explanation)
+    """
+    # Sort pairs by first position for consistent comparison
+    sorted_pairs = sorted(relative_pairs)
+    
+    # Get expected pattern
+    expected = get_expected_pairs(folder_type)
+    expected_sorted = sorted(expected)
+    
+    if sorted_pairs == expected_sorted:
+        return True, "Pair ordering matches expected pattern"
+    
+    # Check what went wrong
+    explanation = f"Expected: {expected_sorted}, Got: {sorted_pairs}"
+    return False, explanation
 
 
 def create_result_visualization(

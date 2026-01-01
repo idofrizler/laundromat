@@ -7,23 +7,24 @@ Tests the complete pipeline:
 3. Pair matching (verify correct pairs based on spatial arrangement)
 
 Test data:
-- straight_line/: Socks arranged left-to-right, pairs are consecutive (1&2, 3&4, etc.)
-- outside_in/: Socks arranged left-to-right, pairs are mirrored (1&10, 2&9, etc.)
+- straight_line/: Socks arranged top-to-bottom, pairs are consecutive (1&2, 3&4, etc.)
+- outside_in/: Socks arranged top-to-bottom, pairs are mirrored (1&10, 2&9, etc.)
 """
 
 import pytest
 from pathlib import Path
 
 from testing.test_utils import (
-    sort_socks_by_x_position,
+    sort_socks_by_y_position,
     get_expected_pairs,
     map_detected_pairs_to_positions,
     normalize_pairs,
     create_result_visualization,
     run_detection_pipeline,
+    get_relative_pair_positions,
+    check_pair_ordering,
 )
 from testing.conftest import DATA_DIR
-
 
 def get_all_test_images():
     """Get all test images with their folder types for parametrization."""
@@ -43,10 +44,8 @@ def get_all_test_images():
     
     return images
 
-
 # Get test images for parametrization
 TEST_IMAGES = get_all_test_images()
-
 
 @pytest.mark.parametrize("image_path,folder_type", TEST_IMAGES, 
                          ids=[f"{p.parent.name}/{p.name}" for p, _ in TEST_IMAGES])
@@ -74,7 +73,14 @@ class TestPairMatching:
     
     def test_pair_matching(self, image_path, folder_type, predictor, resnet_model, output_dir):
         """
-        Test that detected pairs match the expected spatial arrangement.
+        Test that detected pairs have correct RELATIVE ordering within the paired socks.
+        
+        This test only considers the 10 socks that are actually paired (5 pairs x 2 socks).
+        It checks if the relative positions within those 10 socks match the expected pattern.
+        
+        This allows testing the pairing logic independently of detection accuracy -
+        even if SAM3 detects extra socks, we can verify that the pairing algorithm
+        is correctly matching the most similar socks.
         
         For straight_line: pairs should be (1,2), (3,4), (5,6), (7,8), (9,10)
         For outside_in: pairs should be (1,10), (2,9), (3,8), (4,7), (5,6)
@@ -86,21 +92,21 @@ class TestPairMatching:
             image_path, predictor, resnet, preprocess, device, top_n_pairs=5
         )
         
-        # Skip if not enough socks detected
-        if total_socks < 10:
-            pytest.skip(f"Only {total_socks} socks detected, need 10")
+        # Need at least 5 pairs
+        if len(top_pairs) < 5:
+            pytest.skip(f"Only {len(top_pairs)} pairs detected, need 5")
         
-        # Sort socks by x-position to get positions 1-10
-        sorted_indices = sort_socks_by_x_position(boxes)
+        # Get relative positions within the paired socks only
+        relative_pairs = get_relative_pair_positions(top_pairs, boxes)
         
-        # Map detected pairs to position pairs
-        detected_pairs = map_detected_pairs_to_positions(top_pairs, sorted_indices)
+        # Check if ordering matches expected pattern
+        is_correct, explanation = check_pair_ordering(relative_pairs, folder_type)
         
-        # Get expected pairs for this folder type
+        # Get expected for assertion message
         expected_pairs = get_expected_pairs(folder_type)
-        expected_set = normalize_pairs(expected_pairs)
         
-        # Save visualization
+        # Save visualization (using relative pairs info)
+        sorted_indices = sort_socks_by_y_position(boxes)
         output_subdir = output_dir / folder_type
         output_path = output_subdir / f"{image_path.stem}_result.jpg"
         
@@ -110,21 +116,17 @@ class TestPairMatching:
             boxes=boxes,
             sorted_indices=sorted_indices,
             expected_pairs=expected_pairs,
-            detected_pairs=detected_pairs,
+            detected_pairs=set(relative_pairs),
             total_socks=total_socks,
             output_path=output_path
         )
         
-        # Assert pairs match
-        assert detected_pairs == expected_set, (
-            f"Pair mismatch in {image_path.name}\n"
-            f"  Expected: {sorted(expected_set)}\n"
-            f"  Detected: {sorted(detected_pairs)}\n"
-            f"  Missing: {expected_set - detected_pairs}\n"
-            f"  Extra: {detected_pairs - expected_set}\n"
+        assert is_correct, (
+            f"Relative pair ordering mismatch in {image_path.name}\n"
+            f"  {explanation}\n"
+            f"  Total socks detected: {total_socks}\n"
             f"  Result saved to: {output_path}"
         )
-
 
 class TestDetectionOnly:
     """Simpler tests that only check detection, not pairing."""
@@ -145,7 +147,6 @@ class TestDetectionOnly:
         assert total_socks > 0, "No socks detected at all"
         assert len(top_pairs) > 0, "No pairs matched"
 
-
 class TestExpectedPairs:
     """Unit tests for the expected pairs logic."""
     
@@ -164,14 +165,13 @@ class TestExpectedPairs:
         with pytest.raises(ValueError):
             get_expected_pairs("unknown_folder")
 
-
 class TestPositionMapping:
     """Unit tests for position mapping logic."""
     
     def test_map_detected_pairs_to_positions(self):
         """Test mapping from global indices to positions."""
         # Simulated scenario: socks are detected out of order
-        # sorted_indices[0] = 5 means position 1 (leftmost) has global index 5
+        # sorted_indices[0] = 5 means position 1 (topmost) has global index 5
         sorted_indices = [5, 3, 7, 1, 9, 0, 2, 8, 4, 6]
         
         # Detected pair: global indices 5 and 3 (which are positions 1 and 2)
@@ -186,7 +186,6 @@ class TestPositionMapping:
         pairs = [(2, 1), (4, 3), (5, 6)]
         result = normalize_pairs(pairs)
         assert result == {(1, 2), (3, 4), (5, 6)}
-
 
 if __name__ == "__main__":
     # Run tests with pytest

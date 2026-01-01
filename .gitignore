@@ -16,3 +16,9 @@ venv/
 !laundry_pile.mp4
 
 server/certs/*.pem
+
+# Testing output (keep .gitkeep only)
+testing/output/**/*
+!testing/output/.gitkeep
+!testing/output/straight_line/.gitkeep
+!testing/output/outside_in/.gitkeep

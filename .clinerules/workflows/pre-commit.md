@@ -17,8 +17,7 @@ python -m pytest testing/test_pair_matching.py::TestPairMatching -v --tb=short
 ```
 
 **Expected Results:**
-- At least 25 tests passing
-- No more than 5 tests failing
+- No more than 4 tests failing (current known issues)
 - Check for regressions against previous run
 
 ### 3. Run Profiling (After model warmup)
@@ -44,6 +43,6 @@ pkill -f "uvicorn app:app"
 
 Before committing, verify:
 - [ ] Tests: No new failures compared to previous run
-- [ ] Tests: Pass count >= 25
+- [ ] Tests: Failure count <= 4 (current known issues)
 - [ ] Profiling: Total inference time < 850ms
 - [ ] Profiling: No individual step >1.5x baseline

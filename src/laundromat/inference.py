@@ -26,22 +26,73 @@ def filter_contained_masks(masks: np.ndarray, boxes: np.ndarray) -> Tuple[List[i
     
     box_areas = np.array([(box[2] - box[0]) * (box[3] - box[1]) for box in boxes])
     
+    # First pass: count how many socks each detection "contains"
+    # A detection that contains many others is likely a false positive
+    contains_count = [0] * n_masks
+    
+    for i in range(n_masks):
+        area_i = box_areas[i]
+        if area_i == 0:
+            continue
+        box_i = boxes[i]
+        
+        for j in range(n_masks):
+            if i == j:
+                continue
+            
+            area_j = box_areas[j]
+            # Check if j is much smaller and contained in i
+            if area_j >= area_i:
+                continue
+            
+            box_j = boxes[j]
+            
+            inter_x1 = max(box_i[0], box_j[0])
+            inter_y1 = max(box_i[1], box_j[1])
+            inter_x2 = min(box_i[2], box_j[2])
+            inter_y2 = min(box_i[3], box_j[3])
+            
+            if inter_x2 <= inter_x1 or inter_y2 <= inter_y1:
+                continue
+            
+            inter_area = (inter_x2 - inter_x1) * (inter_y2 - inter_y1)
+            
+            # If j is 90%+ inside i, count it
+            if inter_area >= 0.90 * area_j:
+                contains_count[i] += 1
+    
+    # Mark detections that contain 3+ other socks as false positives (mega-containers)
+    mega_container_threshold = 3
+    mega_containers = set()
+    for i in range(n_masks):
+        if contains_count[i] >= mega_container_threshold:
+            mega_containers.add(i)
+    
     keep_indices = []
     exclusion_reasons = []
     
     for i in range(n_masks):
-        is_contained = False
-        containing_idx = -1
         area_i = box_areas[i]
+        box_i = boxes[i]
         
         if area_i == 0:
             exclusion_reasons.append(f"Sock {i}: EXCLUDED - empty box (area=0)")
             continue
         
-        box_i = boxes[i]
+        # Exclude mega-containers (large false positives that contain many socks)
+        if i in mega_containers:
+            exclusion_reasons.append(
+                f"Sock {i}: EXCLUDED (MEGA-CONTAINER) - contains {contains_count[i]} other socks, "
+                f"box=[{box_i[0]:.0f},{box_i[1]:.0f},{box_i[2]:.0f},{box_i[3]:.0f}], area={area_i:.0f}"
+            )
+            continue
+        
+        # Check if this sock is contained inside another (non-mega-container) sock
+        is_contained = False
+        containing_idx = -1
         
         for j in range(n_masks):
-            if i == j:
+            if i == j or j in mega_containers:
                 continue
             
             area_j = box_areas[j]

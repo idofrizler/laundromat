@@ -42,25 +42,47 @@ def compute_cosine_similarity_matrix(embeddings: np.ndarray) -> np.ndarray:
     normalized = embeddings / (norms + 1e-8)
     return np.dot(normalized, normalized.T)
 
+def compute_mask_iou(mask1: np.ndarray, mask2: np.ndarray) -> float:
+    """
+    Compute IoU between two binary masks.
+    
+    Args:
+        mask1: First binary mask
+        mask2: Second binary mask
+        
+    Returns:
+        IoU score between 0 and 1
+    """
+    intersection = np.sum((mask1 > 0.5) & (mask2 > 0.5))
+    union = np.sum((mask1 > 0.5) | (mask2 > 0.5))
+    return intersection / union if union > 0 else 0
+
 def find_best_pairs(
     embeddings: np.ndarray,
     boxes: np.ndarray,
     valid_indices: List[int],
     top_n: int = 3,
-    iou_threshold: float = 0.3
+    iou_threshold: float = 0.3,
+    min_similarity: float = 0.0,
+    masks: np.ndarray = None,
+    mask_iou_threshold: float = 0.3
 ) -> List[Tuple[int, int]]:
     """
     Find the best matching pairs based on ResNet feature similarity.
     
     Uses cosine similarity between embeddings to find pairs, while avoiding
-    overlapping detections (high IoU).
+    overlapping detections (high IoU). If masks are provided, uses mask IoU
+    to confirm overlap (more accurate than box IoU for adjacent socks).
     
     Args:
         embeddings: Feature embeddings for each detection
         boxes: Bounding boxes for each detection
         valid_indices: Mapping from local to global indices
         top_n: Maximum number of pairs to return
-        iou_threshold: Maximum IoU allowed between paired items
+        iou_threshold: Box IoU threshold to trigger mask IoU check
+        min_similarity: Minimum cosine similarity required for a valid pair (0.0-1.0)
+        masks: Optional detection masks for accurate overlap check
+        mask_iou_threshold: Mask IoU threshold to confirm overlap (only used if masks provided)
         
     Returns:
         List of (global_idx_i, global_idx_j) tuples representing matched pairs
@@ -84,6 +106,12 @@ def find_best_pairs(
             break
             
         i_local, j_local = np.unravel_index(idx, similarity.shape)
+        sim_score = similarity[i_local, j_local]
+        
+        # Skip if similarity is below threshold
+        if sim_score < min_similarity:
+            break  # Since we're iterating in descending order, no more valid pairs
+        
         i_global = valid_indices[i_local]
         j_global = valid_indices[j_local]
         
@@ -91,9 +119,20 @@ def find_best_pairs(
         if i_local >= j_local or i_global in used_indices or j_global in used_indices:
             continue
         
-        # Skip if boxes overlap too much (likely same object detected twice)
-        if compute_iou(boxes[i_global], boxes[j_global]) >= iou_threshold:
-            continue
+        # Check overlap - use mask IoU if masks provided, otherwise box IoU
+        box_iou = compute_iou(boxes[i_global], boxes[j_global])
+        
+        if box_iou >= iou_threshold:
+            # Box overlap detected - check mask overlap if masks available
+            if masks is not None:
+                mask_iou = compute_mask_iou(masks[i_global], masks[j_global])
+                if mask_iou >= mask_iou_threshold:
+                    # Both box and mask overlap - likely same object, skip
+                    continue
+                # Mask doesn't overlap much - these are adjacent socks, allow pairing
+            else:
+                # No masks available, use box IoU alone
+                continue
         
         top_pairs.append((i_global, j_global))
         used_indices.add(i_global)

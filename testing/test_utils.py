@@ -321,6 +321,9 @@ def create_result_visualization(
     final_rgb.save(output_path, quality=95)
 
 
+# Import filtering functions from production code
+from src.laundromat.inference import filter_false_positive_detections
+
 def run_detection_pipeline(
     image_path: Path,
     predictor,
@@ -331,6 +334,10 @@ def run_detection_pipeline(
 ) -> Tuple[np.ndarray, np.ndarray, np.ndarray, List[Dict[str, Any]], List[Tuple[int, int]], int]:
     """
     Run the full detection and matching pipeline on an image.
+    
+    Includes filtering to remove:
+    1. Masks that are fully contained within another mask (duplicate detections)
+    2. Masks that are too small (< 10% of average size)
     
     Args:
         image_path: Path to the image file
@@ -363,8 +370,18 @@ def run_detection_pipeline(
         return np.array([]), np.array([]), np.array([]), [], [], 0
     
     result = results[0]
-    masks = result.masks.data.cpu().numpy()
-    boxes = result.boxes.xyxy.cpu().numpy()
+    masks_raw = result.masks.data.cpu().numpy()
+    boxes_raw = result.boxes.xyxy.cpu().numpy()
+    
+    print(f"\n=== RAW DETECTION: {len(masks_raw)} socks from SAM3 ===")
+    
+    # Use production filtering to remove false positives (verbose=True for logging)
+    masks, boxes = filter_false_positive_detections(masks_raw, boxes_raw, verbose=True)
+    
+    print(f"=== AFTER FILTERING: {len(masks)} socks ===\n")
+    
+    if len(masks) == 0:
+        return np.array([]), np.array([]), np.array([]), [], [], 0
     
     total_socks = len(masks)
     
@@ -379,13 +396,14 @@ def run_detection_pipeline(
     if len(embeddings) == 0:
         return masks, boxes, embeddings, [], [], total_socks
     
-    # Find pairs
+    # Find pairs (pass masks for accurate overlap detection)
     top_pairs = find_best_pairs(
         embeddings=embeddings,
         boxes=boxes,
         valid_indices=valid_indices,
         top_n=top_n_pairs,
-        iou_threshold=0.3
+        iou_threshold=0.3,
+        masks=masks
     )
     
     # Build pairs_data for visualization

@@ -92,9 +92,30 @@ class TestPairMatching:
             image_path, predictor, resnet, preprocess, device, top_n_pairs=5
         )
         
-        # Need at least 5 pairs
+        # Get expected pairs for this folder type
+        expected_pairs = get_expected_pairs(folder_type)
+        
+        # Prepare output path
+        output_subdir = output_dir / folder_type
+        output_path = output_subdir / f"{image_path.stem}_result.jpg"
+        
+        # Handle insufficient pairs - still save visualization before skipping
         if len(top_pairs) < 5:
-            pytest.skip(f"Only {len(top_pairs)} pairs detected, need 5")
+            # Save what we have for debugging
+            if len(boxes) > 0:
+                sorted_indices = sort_socks_by_y_position(boxes)
+                relative_pairs = get_relative_pair_positions(top_pairs, boxes) if top_pairs else []
+                create_result_visualization(
+                    image_path=image_path,
+                    pairs_data=pairs_data,
+                    boxes=boxes,
+                    sorted_indices=sorted_indices,
+                    expected_pairs=expected_pairs,
+                    detected_pairs=set(relative_pairs),
+                    total_socks=total_socks,
+                    output_path=output_path
+                )
+            pytest.skip(f"Only {len(top_pairs)} pairs detected, need 5. Visualization saved to: {output_path}")
         
         # Get relative positions within the paired socks only
         relative_pairs = get_relative_pair_positions(top_pairs, boxes)
@@ -102,13 +123,8 @@ class TestPairMatching:
         # Check if ordering matches expected pattern
         is_correct, explanation = check_pair_ordering(relative_pairs, folder_type)
         
-        # Get expected for assertion message
-        expected_pairs = get_expected_pairs(folder_type)
-        
         # Save visualization (using relative pairs info)
         sorted_indices = sort_socks_by_y_position(boxes)
-        output_subdir = output_dir / folder_type
-        output_path = output_subdir / f"{image_path.stem}_result.jpg"
         
         create_result_visualization(
             image_path=image_path,

@@ -10,7 +10,7 @@ from PIL import Image
 from typing import List, Dict, Any, Tuple, Optional
 
 from .config import VideoProcessorConfig, DEFAULT_PAIR_COLORS
-from .matching import find_best_pairs
+from .matching import find_best_pairs, compute_iou, compute_mask_iou
 from .tracking import find_tracking_points
 from .timing import TimingContext, timed_section
 
@@ -30,6 +30,343 @@ def get_box_centroid(box: np.ndarray) -> Tuple[float, float]:
     """
     x1, y1, x2, y2 = box
     return ((x1 + x2) / 2, (y1 + y2) / 2)
+
+# compute_iou is imported from matching.py to avoid duplication
+
+def filter_contained_masks(masks: np.ndarray, boxes: np.ndarray) -> Tuple[List[int], List[str]]:
+    """
+    Filter out masks that are fully contained within another mask.
+    
+    Uses bounding box containment as a fast approximation - if box_i is
+    mostly inside box_j and area is smaller, consider it contained.
+    
+    This is much faster than pixel-level mask comparison.
+    
+    Args:
+        masks: Array of masks [N, H, W]
+        boxes: Array of bounding boxes [N, 4]
+        
+    Returns:
+        Tuple of (keep_indices, exclusion_reasons)
+    """
+    n_masks = len(masks)
+    if n_masks == 0:
+        return [], []
+    
+    # Pre-compute box areas (faster than mask areas)
+    box_areas = np.array([
+        (box[2] - box[0]) * (box[3] - box[1]) for box in boxes
+    ])
+    
+    keep_indices = []
+    exclusion_reasons = []
+    
+    for i in range(n_masks):
+        is_contained = False
+        containing_idx = -1
+        area_i = box_areas[i]
+        
+        if area_i == 0:
+            exclusion_reasons.append(f"Sock {i}: EXCLUDED - empty box (area=0)")
+            continue  # Skip empty boxes
+        
+        box_i = boxes[i]
+        
+        for j in range(n_masks):
+            if i == j:
+                continue
+            
+            area_j = box_areas[j]
+            
+            # Skip if box_j is smaller or equal (can't contain box_i)
+            if area_j <= area_i:
+                continue
+            
+            box_j = boxes[j]
+            
+            # Fast box containment check using IoU-style intersection
+            # Check if box_i is mostly inside box_j
+            inter_x1 = max(box_i[0], box_j[0])
+            inter_y1 = max(box_i[1], box_j[1])
+            inter_x2 = min(box_i[2], box_j[2])
+            inter_y2 = min(box_i[3], box_j[3])
+            
+            if inter_x2 <= inter_x1 or inter_y2 <= inter_y1:
+                continue  # No overlap
+            
+            inter_area = (inter_x2 - inter_x1) * (inter_y2 - inter_y1)
+            
+            # If 90%+ of box_i is inside box_j, consider it contained
+            if inter_area >= 0.90 * area_i:
+                is_contained = True
+                containing_idx = j
+                break
+        
+        if is_contained:
+            exclusion_reasons.append(
+                f"Sock {i}: EXCLUDED (CONTAINED) - 90%+ inside sock {containing_idx}, "
+                f"box=[{box_i[0]:.0f},{box_i[1]:.0f},{box_i[2]:.0f},{box_i[3]:.0f}], area={area_i:.0f}"
+            )
+        else:
+            keep_indices.append(i)
+    
+    return keep_indices, exclusion_reasons
+
+def filter_small_boxes(
+    boxes: np.ndarray, 
+    keep_indices: List[int],
+    min_size_ratio: float = 0.1
+) -> Tuple[List[int], List[str]]:
+    """
+    Filter out boxes that are too small compared to the average size.
+    
+    Uses box area instead of mask area for speed.
+    
+    Args:
+        boxes: Array of bounding boxes [N, 4]
+        keep_indices: Current list of indices to consider
+        min_size_ratio: Minimum size as fraction of average (default 10%)
+        
+    Returns:
+        Tuple of (filtered_indices, exclusion_reasons)
+    """
+    if len(keep_indices) == 0:
+        return [], []
+    
+    # Calculate box areas (fast)
+    areas = {idx: (boxes[idx][2] - boxes[idx][0]) * (boxes[idx][3] - boxes[idx][1]) 
+             for idx in keep_indices}
+    
+    if len(areas) == 0:
+        return keep_indices, []
+    
+    avg_area = np.mean(list(areas.values()))
+    min_area = avg_area * min_size_ratio
+    
+    # Keep only boxes above minimum size
+    filtered_indices = []
+    exclusion_reasons = []
+    
+    for idx in keep_indices:
+        area = areas[idx]
+        if area >= min_area:
+            filtered_indices.append(idx)
+        else:
+            box = boxes[idx]
+            exclusion_reasons.append(
+                f"Sock {idx}: EXCLUDED (TOO SMALL) - area={area:.0f} < min={min_area:.0f} "
+                f"({area/avg_area*100:.1f}% of avg), box=[{box[0]:.0f},{box[1]:.0f},{box[2]:.0f},{box[3]:.0f}]"
+            )
+    
+    return filtered_indices, exclusion_reasons
+
+# compute_mask_iou is imported from matching.py to avoid duplication
+
+def filter_overlapping_detections(
+    masks: np.ndarray,
+    boxes: np.ndarray,
+    keep_indices: List[int],
+    box_iou_threshold: float = 0.3,
+    mask_iou_threshold: float = 0.3
+) -> Tuple[List[int], List[str]]:
+    """
+    Filter out overlapping detections using mask-based NMS.
+    
+    First checks box IoU for quick rejection, then confirms with mask IoU.
+    This prevents removing valid socks that have overlapping boxes but
+    non-overlapping masks.
+    
+    Args:
+        masks: Array of masks [N, H, W]
+        boxes: Array of bounding boxes [N, 4]
+        keep_indices: Current list of indices to consider
+        box_iou_threshold: Box IoU threshold for candidate overlap
+        mask_iou_threshold: Mask IoU threshold to confirm overlap
+        
+    Returns:
+        Tuple of (filtered_indices, exclusion_reasons)
+    """
+    if len(keep_indices) <= 1:
+        return keep_indices, []
+    
+    # Calculate mask areas (for sorting)
+    areas = {idx: np.sum(masks[idx] > 0.5) for idx in keep_indices}
+    
+    # Sort by mask area (largest first) - prefer keeping larger masks
+    sorted_indices = sorted(keep_indices, key=lambda x: areas[x], reverse=True)
+    
+    final_keep = []
+    exclusion_reasons = []
+    
+    for idx in sorted_indices:
+        is_duplicate = False
+        overlap_idx = -1
+        overlap_box_iou = 0
+        overlap_mask_iou = 0
+        
+        for kept_idx in final_keep:
+            # Quick box IoU check first
+            box_iou = compute_iou(boxes[idx], boxes[kept_idx])
+            if box_iou < box_iou_threshold:
+                continue  # Boxes don't overlap enough, skip
+            
+            # Boxes overlap - now check mask overlap
+            mask_iou = compute_mask_iou(masks[idx], masks[kept_idx])
+            if mask_iou >= mask_iou_threshold:
+                # Both box and mask overlap - this is a duplicate
+                is_duplicate = True
+                overlap_idx = kept_idx
+                overlap_box_iou = box_iou
+                overlap_mask_iou = mask_iou
+                break
+        
+        if is_duplicate:
+            box = boxes[idx]
+            exclusion_reasons.append(
+                f"Sock {idx}: EXCLUDED (OVERLAP NMS) - box_IoU={overlap_box_iou:.2f}, "
+                f"mask_IoU={overlap_mask_iou:.2f} with sock {overlap_idx}, "
+                f"mask_area={areas[idx]:.0f}"
+            )
+        else:
+            final_keep.append(idx)
+    
+    return final_keep, exclusion_reasons
+
+def filter_sparse_masks(
+    masks: np.ndarray,
+    boxes: np.ndarray,
+    min_fill_ratio: float = 0.15
+) -> Tuple[List[int], List[str]]:
+    """
+    Filter out masks that are too sparse (tiny mask in huge bounding box).
+    
+    This catches garbage detections where SAM3 produces a small mask
+    but an incorrectly large bounding box.
+    
+    Uses vectorized np.sum on boolean arrays which is highly optimized.
+    
+    Args:
+        masks: Array of masks [N, H, W]
+        boxes: Array of bounding boxes [N, 4]
+        min_fill_ratio: Minimum mask_pixels / box_area ratio (default 15%)
+        
+    Returns:
+        Tuple of (keep_indices, exclusion_reasons)
+    """
+    n = len(masks)
+    if n == 0:
+        return [], []
+    
+    keep_indices = []
+    exclusion_reasons = []
+    
+    for i in range(n):
+        box = boxes[i]
+        box_area = (box[2] - box[0]) * (box[3] - box[1])
+        
+        if box_area == 0:
+            exclusion_reasons.append(f"Sock {i}: EXCLUDED (SPARSE) - box area is 0")
+            continue
+        
+        # Fast: np.sum on boolean array just counts True values
+        mask_pixels = np.sum(masks[i] > 0.5)
+        fill_ratio = mask_pixels / box_area
+        
+        if fill_ratio < min_fill_ratio:
+            exclusion_reasons.append(
+                f"Sock {i}: EXCLUDED (SPARSE) - fill={fill_ratio*100:.1f}% < {min_fill_ratio*100:.0f}%, "
+                f"mask={mask_pixels:.0f}px, box_area={box_area:.0f}"
+            )
+        else:
+            keep_indices.append(i)
+    
+    return keep_indices, exclusion_reasons
+
+def filter_false_positive_detections(
+    masks: np.ndarray,
+    boxes: np.ndarray,
+    verbose: bool = False
+) -> Tuple[np.ndarray, np.ndarray]:
+    """
+    Filter out false positive detections from SAM3 output.
+    
+    Applies four filtering stages:
+    0. Remove sparse masks (mask < 15% of box area) - catches garbage detections
+    1. Remove masks that are fully contained within another mask (duplicates)
+    2. Remove masks that are too small (< 10% of average size)
+    3. Remove overlapping detections via NMS (IoU >= 0.3)
+    
+    Args:
+        masks: Raw detection masks from SAM3 [N, H, W]
+        boxes: Raw bounding boxes from SAM3 [N, 4]
+        verbose: If True, print detailed exclusion reasons
+        
+    Returns:
+        Tuple of (filtered_masks, filtered_boxes)
+    """
+    if len(masks) == 0:
+        return masks, boxes
+    
+    all_exclusion_reasons = []
+    
+    # Filter 0: Remove sparse masks (garbage detections with tiny mask in huge box)
+    keep_indices, reasons0 = filter_sparse_masks(masks, boxes, min_fill_ratio=0.15)
+    all_exclusion_reasons.extend(reasons0)
+    
+    # Need to create filtered arrays for subsequent filters
+    if len(keep_indices) == 0:
+        if verbose or len(all_exclusion_reasons) > 0:
+            print(f"\n=== FALSE POSITIVE FILTERING: {len(masks)} raw -> 0 kept ===")
+            for reason in all_exclusion_reasons:
+                print(f"  {reason}")
+            print()
+        return np.array([]), np.array([])
+    
+    # Create index mapping for subsequent filters
+    masks_filtered = masks[keep_indices]
+    boxes_filtered = boxes[keep_indices]
+    
+    # Filter 1: Remove boxes that are contained within another box
+    local_keep, reasons1 = filter_contained_masks(masks_filtered, boxes_filtered)
+    all_exclusion_reasons.extend([r.replace(f"Sock ", f"Sock {keep_indices[int(r.split()[1].rstrip(':'))]}->") 
+                                   if r.startswith("Sock ") else r for r in reasons1])
+    
+    # Filter 2: Remove boxes that are too small (< 10% of average)
+    local_keep, reasons2 = filter_small_boxes(boxes_filtered, local_keep, min_size_ratio=0.1)
+    all_exclusion_reasons.extend(reasons2)
+    
+    # Filter 3: Remove overlapping detections (NMS-style) - checks mask overlap
+    local_keep, reasons3 = filter_overlapping_detections(
+        masks_filtered, boxes_filtered, local_keep, 
+        box_iou_threshold=0.3, mask_iou_threshold=0.3
+    )
+    all_exclusion_reasons.extend(reasons3)
+    
+    # Map back to original indices
+    keep_indices = [keep_indices[i] for i in local_keep]
+    
+    # Log all exclusion reasons
+    if all_exclusion_reasons:
+        logger.info(f"=== FALSE POSITIVE FILTERING: {len(masks)} raw -> {len(keep_indices)} kept ===")
+        for reason in all_exclusion_reasons:
+            logger.info(f"  {reason}")
+        logger.info(f"=== KEPT SOCKS: {keep_indices} ===")
+    
+    # Also print to stdout for test visibility
+    if verbose or len(all_exclusion_reasons) > 0:
+        print(f"\n=== FALSE POSITIVE FILTERING: {len(masks)} raw -> {len(keep_indices)} kept ===")
+        for reason in all_exclusion_reasons:
+            print(f"  {reason}")
+        if len(keep_indices) > 0:
+            kept_info = [f"{idx}:[{boxes[idx][0]:.0f},{boxes[idx][1]:.0f},{boxes[idx][2]:.0f},{boxes[idx][3]:.0f}]" 
+                        for idx in keep_indices]
+            print(f"  KEPT: {', '.join(kept_info)}")
+        print()
+    
+    if len(keep_indices) == 0:
+        return np.array([]), np.array([])
+    
+    return masks[keep_indices], boxes[keep_indices]
 
 
 def is_point_in_box(point: Tuple[float, float], box: np.ndarray) -> bool:
@@ -379,10 +716,14 @@ def run_inference_on_frame(
     
     with timed_section(timing, "SAM3 result extraction"):
         result = results[0]
-        masks = result.masks.data.cpu().numpy()
-        boxes = result.boxes.xyxy.cpu().numpy()
+        masks_raw = result.masks.data.cpu().numpy()
+        boxes_raw = result.boxes.xyxy.cpu().numpy()
     
-    # Total socks detected by SAM3 (before filtering)
+    # Filter false positive detections (contained, small, overlapping)
+    with timed_section(timing, "False positive filtering", f"{len(masks_raw)} raw"):
+        masks, boxes = filter_false_positive_detections(masks_raw, boxes_raw)
+    
+    # Total socks detected after filtering
     total_socks_detected = len(masks)
     
     # Filter socks inside baskets if we have baskets
@@ -405,14 +746,15 @@ def run_inference_on_frame(
     if len(embeddings) == 0:
         return [], total_socks_detected, basket_masks_list
     
-    # Find best pairs
+    # Find best pairs (pass masks for accurate overlap detection)
     with timed_section(timing, "Pair matching"):
         top_pairs = find_best_pairs(
             embeddings=embeddings,
             boxes=boxes,
             valid_indices=valid_indices,
             top_n=config.top_n_pairs,
-            iou_threshold=config.iou_threshold
+            iou_threshold=config.iou_threshold,
+            masks=masks
         )
     
     # Prepare tracking data

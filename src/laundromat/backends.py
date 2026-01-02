@@ -1,9 +1,3 @@
-"""
-Inference backend for connecting to the inference server.
-
-The client always connects to a server for inference.
-The server can run on localhost or a remote machine.
-"""
 
 import time
 import cv2
@@ -19,27 +13,15 @@ except ImportError:
 
 @dataclass
 class InferenceResult:
-    """Result from inference on a single frame."""
     pairs_data: List[Dict[str, Any]]
     total_socks_detected: int
-    basket_boxes: List[np.ndarray]  # List of basket bounding boxes [x1, y1, x2, y2]
-    # Client-side timing (ms)
+    basket_boxes: List[np.ndarray]
     client_jpeg_encode_ms: float = 0.0
     client_network_ms: float = 0.0
     client_decode_ms: float = 0.0
-    # Server-side timing breakdown (from server response)
     server_timing: Dict[str, float] = field(default_factory=dict)
 
 def decode_mask_rle(rle: Dict[str, Any]) -> np.ndarray:
-    """
-    Decode a Run-Length Encoded mask.
-    
-    Args:
-        rle: Dictionary with 'counts' and 'size'
-        
-    Returns:
-        Binary mask as uint8 array (H, W)
-    """
     counts = rle['counts']
     h, w = rle['size']
     
@@ -55,26 +37,8 @@ def decode_mask_rle(rle: Dict[str, Any]) -> np.ndarray:
     return flat.reshape((h, w), order='F')
 
 class InferenceClient:
-    """
-    Client for connecting to the inference server.
-    
-    Sends frames via HTTP and receives detection results.
-    Supports automatic image resizing to prevent server overload.
-    """
-    
     def __init__(self, server_url: str, config=None, jpeg_quality: int = 85, 
                  max_dimension: int = 1280, timeout: int = 60, verify_ssl: bool = True):
-        """
-        Initialize the inference client.
-        
-        Args:
-            server_url: URL of the inference server (e.g., http://localhost:8080)
-            config: VideoProcessorConfig (optional, for top_n_pairs etc.)
-            jpeg_quality: JPEG compression quality (0-100)
-            max_dimension: Max image dimension to send (larger images resized)
-            timeout: Request timeout in seconds
-            verify_ssl: Whether to verify SSL certificates (set False for self-signed)
-        """
         if not HAS_REQUESTS:
             raise ImportError("requests library required. Install with: pip install requests")
         
@@ -91,10 +55,8 @@ class InferenceClient:
         return self._connected
     
     def connect(self):
-        """Connect to the inference server."""
         self._session = requests.Session()
         
-        # Disable SSL warnings for self-signed certs
         if not self.verify_ssl:
             import urllib3
             urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
@@ -114,29 +76,18 @@ class InferenceClient:
             raise ConnectionError(f"Cannot connect to server {self.server_url}: {e}")
     
     def disconnect(self):
-        """Disconnect from the server."""
         if self._session:
             self._session.close()
         self._session = None
         self._connected = False
     
     def infer(self, frame_bgr: np.ndarray, print_timing: bool = False) -> InferenceResult:
-        """
-        Send frame to server for inference.
-        
-        Args:
-            frame_bgr: BGR frame from OpenCV
-            print_timing: Whether to print timing summary to console
-            
-        Returns:
-            InferenceResult with pairs_data, timing info, and detection results
-        """
         if not self._connected:
             self.connect()
         
         original_height, original_width = frame_bgr.shape[:2]
         
-        # Resize if too large (prevents server OOM)
+        # Resize if too large
         frame_to_send = frame_bgr
         if max(original_height, original_width) > self.max_dimension:
             scale = self.max_dimension / max(original_height, original_width)
@@ -145,7 +96,7 @@ class InferenceClient:
             frame_to_send = cv2.resize(frame_bgr, (new_width, new_height),
                                        interpolation=cv2.INTER_AREA)
         
-        # Time: JPEG encoding
+        # JPEG encoding
         t0 = time.perf_counter()
         encode_params = [cv2.IMWRITE_JPEG_QUALITY, self.jpeg_quality]
         _, jpeg_bytes = cv2.imencode('.jpg', frame_to_send, encode_params)
@@ -157,7 +108,7 @@ class InferenceClient:
             params['top_n_pairs'] = self.config.top_n_pairs
             params['detection_prompt'] = self.config.detection_prompt
         
-        # Time: Network request (includes server processing)
+        # Network request
         t0 = time.perf_counter()
         response = self._session.post(
             f"{self.server_url}/infer",
@@ -172,31 +123,26 @@ class InferenceClient:
         result = response.json()
         network_ms = (time.perf_counter() - t0) * 1000
         
-        # Time: Decode response (RLE masks, etc.)
+        # Decode response
         t0 = time.perf_counter()
         
-        # Calculate scale factor based on mask size vs original frame size
         scale_factor = 1.0
         
-        # Decode masks, tracking points, and convert to internal format
         pairs_data = []
         for item in result['pairs_data']:
             mask = decode_mask_rle(item['mask_rle'])
             
-            # Resize mask back to original frame size if server resized
             if mask.shape != (original_height, original_width):
                 scale_factor = original_width / mask.shape[1]
                 mask = cv2.resize(mask, (original_width, original_height), 
                                  interpolation=cv2.INTER_NEAREST)
             
-            # Decode tracking points (scale if image was resized)
             points = None
             if item.get('points') is not None:
                 points = np.array(item['points'], dtype=np.float32)
                 if scale_factor != 1.0:
                     points = points * scale_factor
             
-            # Scale bounding box as well
             box = np.array(item['box'])
             if scale_factor != 1.0:
                 box = box * scale_factor
@@ -207,10 +153,9 @@ class InferenceClient:
                 'label': item['label'],
                 'color': tuple(item['color']),
                 'transform': np.eye(3),
-                'points': points,  # Tracking points from server
+                'points': points,
             })
         
-        # Decode basket boxes and scale if needed
         basket_boxes = []
         for box_data in result.get('basket_boxes', []):
             box = np.array(box_data)
@@ -220,10 +165,8 @@ class InferenceClient:
         
         decode_ms = (time.perf_counter() - t0) * 1000
         
-        # Get server timing from response
         server_timing = result.get('timing_breakdown', {})
         
-        # Print timing summary if requested
         if print_timing:
             print(f"\n[Client-Server Inference Timing]")
             print(f"  Client JPEG encode:.... {jpeg_encode_ms:>8.2f} ms")

@@ -1,7 +1,3 @@
-"""
-Visualization utilities for drawing pair overlays on frames.
-"""
-
 import cv2
 import numpy as np
 from PIL import Image, ImageDraw
@@ -17,28 +13,12 @@ def draw_pair_overlays(
     mask_alpha: int = 100,
     border_width: int = 3
 ) -> Image.Image:
-    """
-    Draw semi-transparent mask overlays for detected pairs.
-    
-    Args:
-        frame_pil: PIL Image of the frame (RGB)
-        pairs_data: List of pair item dictionaries with mask and transform info
-        width: Frame width
-        height: Frame height
-        mask_alpha: Alpha value for mask fill (0-255)
-        border_width: Width of contour border
-        
-    Returns:
-        Composited PIL Image with overlays
-    """
-    # Create transparent overlay
     overlay = Image.new('RGBA', frame_pil.size, (0, 0, 0, 0))
     draw_overlay = ImageDraw.Draw(overlay)
     
     for item in pairs_data:
         transform = item['transform']
         
-        # Warp mask to current frame position
         warped_mask = warp_mask(
             item['original_mask'],
             transform,
@@ -46,7 +26,6 @@ def draw_pair_overlays(
             height
         )
         
-        # Find contours on warped mask
         contours, _ = cv2.findContours(
             warped_mask,
             cv2.RETR_EXTERNAL,
@@ -58,21 +37,16 @@ def draw_pair_overlays(
         border_color = base_color + (mask_alpha,)
         
         for contour in contours:
-            # Convert contour points to list of tuples
             pts = [tuple(pt[0]) for pt in contour]
             
             if len(pts) > 2:
-                # Draw filled polygon
                 draw_overlay.polygon(pts, fill=fill_color)
-                
-                # Draw border
                 draw_overlay.line(
                     pts + [pts[0]],
                     fill=border_color,
                     width=border_width
                 )
     
-    # Composite overlay onto frame
     frame_rgba = frame_pil.convert('RGBA')
     result = Image.alpha_composite(frame_rgba, overlay)
     
@@ -84,35 +58,18 @@ def draw_stats_overlay(
     matched_socks: int,
     num_pairs: int
 ) -> np.ndarray:
-    """
-    Draw statistics overlay showing detection counts.
-    
-    Args:
-        frame_bgr: BGR frame from OpenCV
-        total_socks: Total number of socks detected by SAM3
-        matched_socks: Number of socks that are part of matched pairs
-        num_pairs: Number of pairs detected
-        
-    Returns:
-        BGR frame with stats overlay
-    """
     height, width = frame_bgr.shape[:2]
-    
-    # Create semi-transparent background for text
     overlay = frame_bgr.copy()
     
-    # Calculate text size based on frame resolution
     font_scale = max(0.6, min(width, height) / 1000)
     thickness = max(1, int(font_scale * 2))
     padding = int(15 * font_scale)
     
-    # Prepare text lines
     lines = [
         f"Socks detected: {total_socks}",
         f"Pairs matched: {num_pairs} ({matched_socks} socks)"
     ]
     
-    # Calculate text dimensions
     font = cv2.FONT_HERSHEY_SIMPLEX
     line_heights = []
     line_widths = []
@@ -122,22 +79,17 @@ def draw_stats_overlay(
         line_heights.append(text_height + baseline)
         line_widths.append(text_width)
     
-    # Background rectangle dimensions
     box_width = max(line_widths) + padding * 2
-    box_height = sum(line_heights) + padding * 2 + padding // 2  # Extra spacing between lines
+    box_height = sum(line_heights) + padding * 2 + padding // 2
     
-    # Position in top-left corner
     box_x1, box_y1 = 10, 10
     box_x2, box_y2 = box_x1 + box_width, box_y1 + box_height
     
-    # Draw semi-transparent background
     cv2.rectangle(overlay, (box_x1, box_y1), (box_x2, box_y2), (0, 0, 0), -1)
     frame_bgr = cv2.addWeighted(overlay, 0.6, frame_bgr, 0.4, 0)
     
-    # Draw text
     y_offset = box_y1 + padding + line_heights[0] - 5
     for i, line in enumerate(lines):
-        # White text with slight shadow for readability
         cv2.putText(frame_bgr, line, (box_x1 + padding + 1, y_offset + 1), 
                     font, font_scale, (0, 0, 0), thickness + 1)
         cv2.putText(frame_bgr, line, (box_x1 + padding, y_offset), 
@@ -146,27 +98,13 @@ def draw_stats_overlay(
     
     return frame_bgr
 
-def draw_basket_labels(
-    frame_bgr: np.ndarray,
-    basket_boxes: List[np.ndarray]
-) -> np.ndarray:
-    """
-    Draw "Basket" text at the center of each detected basket.
-    
-    Args:
-        frame_bgr: BGR frame from OpenCV
-        basket_boxes: List of basket bounding boxes [x1, y1, x2, y2]
-        
-    Returns:
-        BGR frame with basket labels drawn
-    """
+def draw_basket_labels(frame_bgr: np.ndarray, basket_boxes: List[np.ndarray]) -> np.ndarray:
     if not basket_boxes:
         return frame_bgr
     
     result = frame_bgr.copy()
     height, width = frame_bgr.shape[:2]
     
-    # Calculate font scale based on frame resolution
     font_scale = max(0.8, min(width, height) / 800)
     thickness = max(2, int(font_scale * 2))
     font = cv2.FONT_HERSHEY_SIMPLEX
@@ -177,15 +115,12 @@ def draw_basket_labels(
     for box in basket_boxes:
         x1, y1, x2, y2 = map(int, box)
         
-        # Calculate center of basket
         center_x = (x1 + x2) // 2
         center_y = (y1 + y2) // 2
         
-        # Position text centered at the basket center
         text_x = center_x - text_width // 2
         text_y = center_y + text_height // 2
         
-        # Draw text with black outline for visibility
         cv2.putText(result, text, (text_x + 2, text_y + 2), 
                     font, font_scale, (0, 0, 0), thickness + 2)
         cv2.putText(result, text, (text_x, text_y), 
@@ -202,28 +137,11 @@ def composite_frame(
     total_socks_detected: int = 0,
     basket_boxes: Optional[List[np.ndarray]] = None
 ) -> np.ndarray:
-    """
-    Create a composited frame with pair overlays.
-    
-    Args:
-        frame_bgr: BGR frame from OpenCV
-        pairs_data: List of pair item dictionaries
-        mask_alpha: Alpha value for mask fill
-        border_width: Width of contour border
-        show_stats: Whether to show detection statistics overlay
-        total_socks_detected: Total number of socks detected by SAM3
-        basket_boxes: List of detected basket bounding boxes (optional)
-        
-    Returns:
-        BGR frame with overlays drawn
-    """
     height, width = frame_bgr.shape[:2]
     
-    # Convert to PIL
     frame_rgb = cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2RGB)
     frame_pil = Image.fromarray(frame_rgb)
     
-    # Draw overlays
     result_pil = draw_pair_overlays(
         frame_pil,
         pairs_data,
@@ -233,18 +151,14 @@ def composite_frame(
         border_width
     )
     
-    # Convert back to BGR
     result_rgb = np.array(result_pil.convert('RGB'))
     result_bgr = cv2.cvtColor(result_rgb, cv2.COLOR_RGB2BGR)
     
-    # Draw basket labels
     if basket_boxes:
         result_bgr = draw_basket_labels(result_bgr, basket_boxes)
     
-    # Add stats overlay
     if show_stats:
         matched_socks = len(pairs_data)
-        # Count unique pairs (each pair has 2 items with same label)
         unique_labels = set(item['label'] for item in pairs_data)
         num_pairs = len(unique_labels)
         result_bgr = draw_stats_overlay(result_bgr, total_socks_detected, matched_socks, num_pairs)
@@ -256,29 +170,16 @@ def create_debug_visualization(
     pairs_data: List[Dict[str, Any]],
     show_tracking_points: bool = True
 ) -> np.ndarray:
-    """
-    Create a debug visualization showing tracking points and transforms.
-    
-    Args:
-        frame_bgr: BGR frame from OpenCV
-        pairs_data: List of pair item dictionaries
-        show_tracking_points: Whether to draw tracking points
-        
-    Returns:
-        BGR frame with debug visualization
-    """
     debug_frame = frame_bgr.copy()
     
     for item in pairs_data:
         color = item['color'][:3]
         
-        # Draw tracking points
         if show_tracking_points and item['points'] is not None:
             for pt in item['points']:
                 x, y = int(pt[0][0]), int(pt[0][1])
                 cv2.circle(debug_frame, (x, y), 3, color, -1)
         
-        # Draw bounding box (transformed)
         box = item['box']
         transform = item['transform']
         
@@ -294,7 +195,6 @@ def create_debug_visualization(
         pts = transformed_corners.astype(np.int32).reshape((-1, 1, 2))
         cv2.polylines(debug_frame, [pts], True, color, 2)
         
-        # Draw label
         centroid = np.mean(transformed_corners, axis=0).astype(int)
         cv2.putText(
             debug_frame,

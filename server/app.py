@@ -1,10 +1,4 @@
-"""
-Laundromat Inference Server
-
-FastAPI server that provides sock pair detection as a REST API.
-Designed to run on a powerful machine (laptop/cloud with GPU)
-while clients (phones, browsers) send frames for processing.
-"""
+"""Laundromat Inference Server - FastAPI server for sock pair detection."""
 
 import os
 import logging
@@ -19,7 +13,6 @@ from fastapi.staticfiles import StaticFiles
 
 from inference_service import get_inference_service, InferenceResult
 
-# Configure logging
 log_level = os.environ.get('LOG_LEVEL', 'info').upper()
 logging.basicConfig(
     level=getattr(logging, log_level),
@@ -29,8 +22,6 @@ logger = logging.getLogger(__name__)
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    """Lifespan context manager for startup/shutdown events."""
-    # Startup: Load models
     logger.info("Starting Laundromat Inference Server...")
     service = get_inference_service()
     
@@ -43,10 +34,8 @@ async def lifespan(app: FastAPI):
     
     yield
     
-    # Shutdown
     logger.info("Shutting down server...")
 
-# Create FastAPI app
 app = FastAPI(
     title="Laundromat Inference Server",
     description="Sock pair detection using SAM3 and ResNet18",
@@ -54,19 +43,18 @@ app = FastAPI(
     lifespan=lifespan
 )
 
-# Enable CORS for web clients
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],  # In production, restrict to specific origins
+    allow_origins=["*"],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
 
-# Serve web client if it exists (check Docker path first, then relative)
+# Serve web client if it exists
 WEB_CLIENT_PATHS = [
-    '/app/static/client',  # Docker path
-    os.path.join(os.path.dirname(__file__), '..', 'web-client'),  # Local dev path
+    '/app/static/client',
+    os.path.join(os.path.dirname(__file__), '..', 'web-client'),
 ]
 for client_path in WEB_CLIENT_PATHS:
     if os.path.exists(client_path):
@@ -89,7 +77,6 @@ async def root():
 
 @app.get("/health")
 async def health_check():
-    """Health check endpoint for Docker and load balancers."""
     service = get_inference_service()
     return {
         "status": "healthy",
@@ -103,52 +90,6 @@ async def infer(
     detection_prompt: str = Query("socks", description="Text prompt for detection"),
     exclude_basket: bool = Query(False, description="Enable basket detection and sock exclusion")
 ):
-    """
-    Run sock pair detection on a frame.
-    
-    Accepts a JPEG image and returns detected pairs with RLE-encoded masks.
-    Optionally detects laundry baskets and excludes socks inside them.
-    
-    **Request:**
-    - `frame`: JPEG image file (multipart/form-data)
-    - `top_n_pairs`: Maximum pairs to return (1-10)
-    - `detection_prompt`: What to detect (default: "socks")
-    - `exclude_basket`: Enable basket detection and sock exclusion (default: false)
-    
-    **Response:**
-    ```json
-    {
-        "pairs_data": [
-            {
-                "mask_rle": {"counts": [...], "size": [H, W]},
-                "box": [x1, y1, x2, y2],
-                "label": "1",
-                "color": [0, 255, 0, 255]
-            },
-            ...
-        ],
-        "total_socks_detected": 12,
-        "inference_time_ms": 450.5,
-        "basket_masks": [{"counts": [...], "size": [H, W]}, ...],
-        "timing_breakdown": {
-            "jpeg_decode": 2.1,
-            "color_conversion": 0.5,
-            "sam3_set_image": 45.2,
-            "sam3_sock_inference": 312.4,
-            "resnet_feature_extraction": 89.7,
-            "pair_matching": 1.2,
-            "rle_encoding": 3.4,
-            "total_ms": 450.5
-        }
-    }
-    ```
-    
-    **Notes:**
-    - When exclude_basket=true, socks with centroids inside detected laundry baskets are excluded from pair matching
-    - `basket_masks` contains RLE-encoded masks of detected baskets (empty if none detected or exclude_basket=false)
-    - `timing_breakdown` contains per-stage timing in milliseconds for performance profiling
-    """
-    # Validate content type
     if frame.content_type not in ['image/jpeg', 'image/jpg', 'image/png']:
         raise HTTPException(
             status_code=400,
@@ -156,7 +97,6 @@ async def infer(
         )
     
     try:
-        # Read frame data
         frame_bytes = await frame.read()
         
         if len(frame_bytes) == 0:
@@ -164,7 +104,6 @@ async def infer(
         
         logger.debug(f"Received frame: {len(frame_bytes)} bytes")
         
-        # Run inference
         service = get_inference_service()
         result = service.infer_from_jpeg(
             frame_bytes,
@@ -189,7 +128,6 @@ async def infer(
 
 @app.get("/config")
 async def get_config():
-    """Get current server configuration."""
     service = get_inference_service()
     return {
         "model_path": service.model_path,
@@ -198,14 +136,12 @@ async def get_config():
         "max_pairs": 10
     }
 
-# Development server
 if __name__ == "__main__":
     import uvicorn
     
     port = int(os.environ.get("PORT", 8080))
     host = os.environ.get("HOST", "0.0.0.0")
     
-    # Check for SSL certificates
     ssl_keyfile = os.environ.get("SSL_KEYFILE")
     ssl_certfile = os.environ.get("SSL_CERTFILE")
     

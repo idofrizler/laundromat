@@ -1,7 +1,3 @@
-"""
-Main video processing pipeline for sock pair detection.
-"""
-
 import cv2
 import numpy as np
 import queue
@@ -20,10 +16,8 @@ from .tracking import (
 )
 from .visualization import composite_frame
 
-
 @dataclass
 class FrameSource:
-    """Abstraction for video/camera frame sources."""
     capture: cv2.VideoCapture
     width: int
     height: int
@@ -31,20 +25,11 @@ class FrameSource:
     window_title: str
     source_name: str
 
-
 def inference_worker(
     input_queue: queue.Queue,
     output_queue: queue.Queue,
     client: InferenceClient
 ):
-    """
-    Worker thread for async inference via server.
-    
-    Args:
-        input_queue: Queue providing frames to process
-        output_queue: Queue to put results into (tuple of pairs_data, total_socks, basket_boxes)
-        client: InferenceClient connected to server
-    """
     while True:
         frame_bgr = input_queue.get()
         
@@ -61,23 +46,9 @@ def inference_worker(
             input_queue.task_done()
 
 class SockPairVideoProcessor:
-    """
-    Video processor for detecting and tracking sock pairs.
-    
-    Connects to an inference server for SAM3 segmentation,
-    and performs optical flow tracking locally between inference frames.
-    """
     
     def __init__(self, server_url: str, config: Optional[VideoProcessorConfig] = None,
                  verify_ssl: bool = True):
-        """
-        Initialize the video processor.
-        
-        Args:
-            server_url: URL of the inference server (e.g., http://localhost:8080)
-            config: Configuration options. Uses defaults if not provided.
-            verify_ssl: Whether to verify SSL certificates (set False for self-signed)
-        """
         self.config = config or VideoProcessorConfig()
         self.server_url = server_url
         self.verify_ssl = verify_ssl
@@ -91,7 +62,6 @@ class SockPairVideoProcessor:
         self._reset_state()
     
     def _reset_state(self):
-        """Reset processing state between runs."""
         self._current_pairs_data: List[Dict[str, Any]] = []
         self._current_basket_boxes: List[np.ndarray] = []
         self._total_socks_detected: int = 0
@@ -100,7 +70,6 @@ class SockPairVideoProcessor:
         self._lag_transform: np.ndarray = np.eye(3)
     
     def connect(self):
-        """Connect to the inference server."""
         self._client = InferenceClient(
             server_url=self.server_url,
             config=self.config,
@@ -112,7 +81,6 @@ class SockPairVideoProcessor:
         self._client.connect()
     
     def _start_worker(self):
-        """Start the inference worker thread."""
         if self._client is None:
             self.connect()
         
@@ -131,31 +99,21 @@ class SockPairVideoProcessor:
         self._worker_thread.start()
     
     def _stop_worker(self):
-        """Stop the inference worker thread."""
         if self._input_queue is not None:
             self._input_queue.put(None)
         if self._worker_thread is not None:
             self._worker_thread.join()
     
     def _get_current_mask(self, item: Dict, width: int, height: int) -> np.ndarray:
-        """Get warped mask for an item."""
         return warp_mask(item['original_mask'], item['transform'], width, height)
     
     def _get_current_centroid(self, item: Dict) -> tuple:
-        """Get transformed centroid for an item."""
         return get_transformed_centroid(item['box'], item['transform'])
     
     def _apply_color_persistence(self, new_data: List[Dict], width: int, height: int):
-        """
-        Apply color persistence to maintain consistent colors across detections.
-        
-        Matches new detections to old ones based on mask overlap and
-        centroid distance, then assigns consistent colors.
-        """
         if not new_data:
             return
             
-        # Group items by label
         new_pairs_map = self._group_by_label(new_data)
         old_pairs_map = self._group_by_label(self._current_pairs_data)
         
@@ -163,7 +121,6 @@ class SockPairVideoProcessor:
         assigned_colors: Dict[str, tuple] = {}
         used_colors: set = set()
         
-        # Match new pairs to old pairs
         for new_label, new_items in new_pairs_map.items():
             best_match = self._find_best_match(
                 new_items, old_pairs_map, width, height
@@ -175,18 +132,15 @@ class SockPairVideoProcessor:
                     assigned_colors[new_label] = old_color
                     used_colors.add(old_color)
         
-        # Assign new colors to unmatched pairs
         self._assign_remaining_colors(
             new_pairs_map.keys(), assigned_colors, used_colors, colors
         )
         
-        # Apply colors to new_data
         for item in new_data:
             c = assigned_colors[item['label']]
             item['color'] = (c[0], c[1], c[2], 255)
     
     def _group_by_label(self, items: List[Dict]) -> Dict[str, List[Dict]]:
-        """Group items by their label."""
         groups: Dict[str, List[Dict]] = {}
         for item in items:
             label = item['label']
@@ -202,7 +156,6 @@ class SockPairVideoProcessor:
         width: int,
         height: int
     ) -> Optional[str]:
-        """Find the best matching old pair for a new pair."""
         best_score = -1
         best_old_label = None
         
@@ -212,7 +165,6 @@ class SockPairVideoProcessor:
         for old_label, old_items in old_pairs_map.items():
             old_centroids = [self._get_current_centroid(item) for item in old_items]
             
-            # Check minimum centroid distance
             min_dist = min(
                 np.linalg.norm(np.array(nc) - np.array(oc))
                 for nc in new_centroids for oc in old_centroids
@@ -223,7 +175,6 @@ class SockPairVideoProcessor:
             
             old_mask_combined = self._combine_masks(old_items, width, height)
             
-            # Compute IoU
             intersection = cv2.bitwise_and(new_mask_combined, old_mask_combined)
             union = cv2.bitwise_or(new_mask_combined, old_mask_combined)
             iou = np.sum(intersection) / (np.sum(union) + 1e-6)
@@ -237,7 +188,6 @@ class SockPairVideoProcessor:
         return best_old_label
     
     def _combine_masks(self, items: List[Dict], width: int, height: int) -> np.ndarray:
-        """Combine masks from multiple items."""
         combined = np.zeros((height, width), dtype=np.uint8)
         for item in items:
             combined = cv2.bitwise_or(
@@ -253,7 +203,6 @@ class SockPairVideoProcessor:
         used_colors: set,
         colors: List[tuple]
     ):
-        """Assign colors to labels that don't have one yet."""
         color_idx = 0
         for label in labels:
             if label not in assigned_colors:
@@ -269,7 +218,6 @@ class SockPairVideoProcessor:
                     color_idx += 1
     
     def _update_tracking(self, frame_gray: np.ndarray):
-        """Update tracking for existing annotations using optical flow."""
         if not self._current_pairs_data or self._prev_gray is None:
             return
         
@@ -300,22 +248,9 @@ class SockPairVideoProcessor:
         width: int,
         height: int
     ) -> np.ndarray:
-        """
-        Process a single frame through the detection pipeline.
-        
-        Args:
-            frame_bgr: BGR frame
-            frame_count: Current frame number
-            process_every_n: Trigger inference every N frames
-            width: Frame width
-            height: Frame height
-            
-        Returns:
-            Processed frame with overlays
-        """
         frame_gray = cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2GRAY)
         
-        # 1. Compute global motion for lag compensation
+        # Compute global motion for lag compensation
         if self._prev_gray is not None:
             global_motion = compute_global_motion(
                 self._prev_gray,
@@ -330,14 +265,13 @@ class SockPairVideoProcessor:
             if self._pending_inference:
                 self._lag_transform = global_motion @ self._lag_transform
         
-        # 2. Check for inference results
+        # Check for inference results
         if self._pending_inference:
             try:
                 new_data, total_socks, basket_boxes = self._output_queue.get_nowait()
                 self._total_socks_detected = total_socks
                 self._current_basket_boxes = basket_boxes
                 
-                # Apply lag compensation
                 for item in new_data:
                     item['transform'] = self._lag_transform @ item['transform']
                     if item['points'] is not None:
@@ -353,17 +287,17 @@ class SockPairVideoProcessor:
             except queue.Empty:
                 pass
         
-        # 3. Trigger new inference if needed
+        # Trigger new inference if needed
         if not self._pending_inference and frame_count % process_every_n == 1:
             if self._input_queue.empty():
                 self._input_queue.put(frame_bgr.copy())
                 self._pending_inference = True
                 self._lag_transform = np.eye(3)
         
-        # 4. Update tracking
+        # Update tracking
         self._update_tracking(frame_gray)
         
-        # 5. Composite frame
+        # Composite frame
         final_frame = composite_frame(
             frame_bgr,
             self._current_pairs_data,
@@ -384,15 +318,6 @@ class SockPairVideoProcessor:
         show_preview: bool,
         record: bool
     ):
-        """
-        Main processing loop shared by video and camera modes.
-        
-        Args:
-            source: Frame source configuration
-            output_path: Path for output video
-            show_preview: Whether to show preview window
-            record: Whether to record output
-        """
         out_writer = None
         if record and output_path:
             fourcc = cv2.VideoWriter_fourcc(*'mp4v')
@@ -458,17 +383,6 @@ class SockPairVideoProcessor:
         cap: cv2.VideoCapture,
         camera_config: CameraConfig
     ) -> Tuple[int, int, int]:
-        """
-        Configure camera to use the highest available resolution.
-        
-        Args:
-            cap: OpenCV VideoCapture object
-            camera_config: Camera configuration with resolution preferences
-            
-        Returns:
-            Tuple of (width, height, fps) that was actually set
-        """
-        # Build unique resolution list
         resolutions = [(camera_config.preferred_width, camera_config.preferred_height)]
         resolutions.extend(camera_config.resolution_fallbacks)
         
@@ -505,14 +419,6 @@ class SockPairVideoProcessor:
         output_path: Optional[str] = None,
         show_preview: bool = True
     ):
-        """
-        Process a video file to detect and track sock pairs.
-        
-        Args:
-            video_path: Path to input video file
-            output_path: Path for output video (uses config default if None)
-            show_preview: Whether to show live preview window
-        """
         if self._client is None:
             self.connect()
         
@@ -547,17 +453,6 @@ class SockPairVideoProcessor:
         show_preview: bool = True,
         record: bool = True
     ):
-        """
-        Process live camera feed for sock pair detection.
-        
-        Attempts to set the highest possible resolution (up to 4K).
-        
-        Args:
-            camera_config: Camera configuration. Uses defaults if not provided.
-            output_path: Path for output video (uses config default if None)
-            show_preview: Whether to show live preview window
-            record: Whether to record the output to a file
-        """
         if self._client is None:
             self.connect()
         

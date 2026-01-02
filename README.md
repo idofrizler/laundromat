@@ -135,6 +135,74 @@ cd server
 docker-compose build
 ```
 
+## Fine-Tuning for Better Sock Matching
+
+The default ResNet50 features work well for general sock matching, but for better accuracy with similar-looking socks (e.g., distinguishing between multiple grey or white socks), you can train a custom projection head on your specific socks.
+
+### Training Data Structure
+
+Organize your training images like this:
+
+```
+testing/data/socks/
+├── grey/
+│   ├── sock6/
+│   │   ├── photo1.jpg
+│   │   ├── photo2.jpg
+│   │   └── photo3.jpg
+│   ├── sock7/
+│   │   └── ...
+│   └── ...
+└── white/
+    ├── sock1/
+    │   └── ...
+    └── ...
+```
+
+- Each sock gets its own folder with 3-5 photos from different angles
+- Group similar-colored socks in parent folders (grey/, white/) for hard negative mining
+- Use JPEG images with the sock visible against a plain background
+
+### Training the Projection Head
+
+```bash
+# Basic training (uses default settings)
+python -m src.laundromat.finetune.train \
+    --data testing/data/socks \
+    --output server/models/sock_projection_head.pt
+
+# Advanced options
+python -m src.laundromat.finetune.train \
+    --data testing/data/socks \
+    --output server/models/sock_projection_head.pt \
+    --epochs 100 \          # Max training epochs (default: 100)
+    --patience 20 \         # Early stopping patience (default: 20)
+    --lr 0.001 \            # Learning rate (default: 0.001)
+    --margin 0.3 \          # Triplet loss margin (default: 0.3)
+    --triplets 500 \        # Triplets per epoch (default: 500)
+    --batch-size 16         # Batch size (default: 16)
+```
+
+Training output:
+- Model saved to `server/models/sock_projection_head.pt`
+- Best pair accuracy printed at end (aim for >95%)
+- Training uses MPS (Mac), CUDA (GPU), or CPU automatically
+
+### Using the Fine-Tuned Model
+
+The trained projection head is automatically loaded when:
+1. The server starts (if `server/models/sock_projection_head.pt` exists)
+2. Tests run (via the `projection_head` fixture)
+
+No code changes needed - just place the trained model in the right location.
+
+### Tips for Better Results
+
+1. **More photos per sock**: 5-7 photos from different angles helps
+2. **Consistent lighting**: Take photos in similar lighting conditions
+3. **Include edge cases**: Folded, stretched, inside-out views
+4. **Balance categories**: Similar number of socks per color group
+
 ## License
 
 MIT

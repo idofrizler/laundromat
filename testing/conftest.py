@@ -1,10 +1,3 @@
-"""
-Pytest fixtures for laundromat testing.
-
-Provides session-scoped fixtures for model loading to avoid
-reloading models for each test.
-"""
-
 import os
 import sys
 import pytest
@@ -13,7 +6,7 @@ from pathlib import Path
 # Add src to path for imports
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
-from src.laundromat.models import load_sam3_predictor, load_resnet_feature_extractor
+from src.laundromat.models import load_sam3_predictor, load_resnet_feature_extractor, load_sock_projection_head
 
 
 # Directory paths
@@ -36,12 +29,6 @@ def device():
 
 @pytest.fixture(scope="session")
 def predictor():
-    """
-    Load SAM3 predictor once per test session.
-    
-    This is session-scoped to avoid reloading the model for each test,
-    which would be very slow (~10s per load).
-    """
     # Look for model in project root or server/models
     model_paths = [
         "sam3.pt",
@@ -62,21 +49,15 @@ def predictor():
 
 @pytest.fixture(scope="session")
 def resnet_model(device):
-    """
-    Load ResNet feature extractor once per test session.
-    
-    Returns tuple of (model, preprocess_transform, device).
-    """
     return load_resnet_feature_extractor(device)
+
+@pytest.fixture(scope="session")
+def projection_head(device):
+    return load_sock_projection_head(device=device)
 
 
 @pytest.fixture(scope="session")
 def output_dir():
-    """
-    Create and return the output directory for test visualizations.
-    
-    Creates subdirectories for each test folder type.
-    """
     # Create main output directory
     OUTPUT_DIR.mkdir(exist_ok=True)
     
@@ -89,7 +70,6 @@ def output_dir():
 
 @pytest.fixture
 def straight_line_images():
-    """Get list of all straight_line test images."""
     folder = DATA_DIR / "straight_line"
     images = sorted(folder.glob("*.jpg"))
     if not images:
@@ -99,7 +79,6 @@ def straight_line_images():
 
 @pytest.fixture
 def outside_in_images():
-    """Get list of all outside_in test images."""
     folder = DATA_DIR / "outside_in"
     images = sorted(folder.glob("*.jpg"))
     if not images:
@@ -108,7 +87,6 @@ def outside_in_images():
 
 
 def pytest_configure(config):
-    """Add custom markers."""
     config.addinivalue_line(
         "markers", "slow: marks tests as slow (deselect with '-m \"not slow\"')"
     )

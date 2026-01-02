@@ -1,7 +1,3 @@
-"""
-Utility functions for pair matching tests.
-"""
-
 import cv2
 import numpy as np
 from pathlib import Path
@@ -10,32 +6,11 @@ from PIL import Image, ImageDraw, ImageFont
 
 
 def get_box_centroid(box: np.ndarray) -> Tuple[float, float]:
-    """
-    Get the centroid of a bounding box.
-    
-    Args:
-        box: Bounding box [x1, y1, x2, y2]
-        
-    Returns:
-        Tuple of (cx, cy) centroid coordinates
-    """
     x1, y1, x2, y2 = box
     return ((x1 + x2) / 2, (y1 + y2) / 2)
 
 
 def sort_socks_by_y_position(boxes: np.ndarray) -> List[int]:
-    """
-    Sort sock indices by their y-position (top to bottom).
-    
-    For top-down images where socks are arranged in a vertical line,
-    we sort by the Y-coordinate of the centroid.
-    
-    Args:
-        boxes: Array of bounding boxes [N, 4] where each box is [x1, y1, x2, y2]
-        
-    Returns:
-        List of indices sorted by y-centroid (position 0 = topmost sock)
-    """
     centroids = [get_box_centroid(box) for box in boxes]
     # Sort by y-coordinate (top to bottom)
     sorted_indices = sorted(range(len(centroids)), key=lambda i: centroids[i][1])
@@ -43,18 +18,6 @@ def sort_socks_by_y_position(boxes: np.ndarray) -> List[int]:
 
 
 def get_expected_pairs(folder_type: str) -> List[Tuple[int, int]]:
-    """
-    Get the expected sock pairs for a given folder type.
-    
-    Pairs are returned as (position1, position2) tuples where positions
-    are 1-indexed (1-10 from left to right).
-    
-    Args:
-        folder_type: Either 'straight_line' or 'outside_in'
-        
-    Returns:
-        List of (pos1, pos2) tuples representing expected pairs
-    """
     if folder_type == 'straight_line':
         # Consecutive pairs: (1,2), (3,4), (5,6), (7,8), (9,10)
         return [(1, 2), (3, 4), (5, 6), (7, 8), (9, 10)]
@@ -69,16 +32,6 @@ def map_detected_pairs_to_positions(
     detected_pairs: List[Tuple[int, int]],
     sorted_indices: List[int]
 ) -> Set[Tuple[int, int]]:
-    """
-    Map detected pairs (using global indices) to position pairs (1-10).
-    
-    Args:
-        detected_pairs: List of (idx1, idx2) pairs from the matching algorithm
-        sorted_indices: List mapping position (0-9) to global index
-        
-    Returns:
-        Set of (pos1, pos2) tuples where pos1 < pos2 and positions are 1-indexed
-    """
     # Create reverse mapping: global_idx -> position (1-indexed)
     idx_to_position = {idx: pos + 1 for pos, idx in enumerate(sorted_indices)}
     
@@ -96,39 +49,12 @@ def map_detected_pairs_to_positions(
 
 
 def normalize_pairs(pairs: List[Tuple[int, int]]) -> Set[Tuple[int, int]]:
-    """
-    Normalize pairs to have smaller position first and return as set.
-    
-    Args:
-        pairs: List of (pos1, pos2) tuples
-        
-    Returns:
-        Set of normalized (pos1, pos2) tuples where pos1 < pos2
-    """
     return {(min(p[0], p[1]), max(p[0], p[1])) for p in pairs}
 
 def get_relative_pair_positions(
     detected_pairs: List[Tuple[int, int]],
     boxes: np.ndarray
 ) -> List[Tuple[int, int]]:
-    """
-    Get the relative positions of paired socks within the paired set only.
-    
-    This function:
-    1. Collects all sock indices that are part of the detected pairs
-    2. Sorts them by y-position (top to bottom for top-down images)
-    3. Returns pairs as relative positions (1-10) within the paired socks only
-    
-    This allows testing pair ordering even when extra socks are detected.
-    
-    Args:
-        detected_pairs: List of (idx1, idx2) pairs from matching algorithm
-        boxes: All bounding boxes
-        
-    Returns:
-        List of (rel_pos1, rel_pos2) tuples where positions are 1-indexed
-        and represent order within only the paired socks
-    """
     # Collect all unique indices from pairs
     paired_indices = set()
     for idx1, idx2 in detected_pairs:
@@ -158,16 +84,6 @@ def check_pair_ordering(
     relative_pairs: List[Tuple[int, int]],
     folder_type: str
 ) -> Tuple[bool, str]:
-    """
-    Check if the relative pair ordering matches the expected pattern.
-    
-    Args:
-        relative_pairs: List of (rel_pos1, rel_pos2) tuples (1-indexed, normalized)
-        folder_type: Either 'straight_line' or 'outside_in'
-        
-    Returns:
-        Tuple of (is_correct, explanation)
-    """
     # Sort pairs by first position for consistent comparison
     sorted_pairs = sorted(relative_pairs)
     
@@ -193,19 +109,6 @@ def create_result_visualization(
     total_socks: int,
     output_path: Path
 ) -> None:
-    """
-    Create a visualization of the test results and save to file.
-    
-    Args:
-        image_path: Path to the original image
-        pairs_data: List of pair item dictionaries with mask and color info
-        boxes: All detected bounding boxes
-        sorted_indices: Indices sorted by x-position
-        expected_pairs: Expected pairs for this test case
-        detected_pairs: Actually detected pairs (as position tuples)
-        total_socks: Total number of socks detected
-        output_path: Path to save the visualization
-    """
     # Load original image
     frame_bgr = cv2.imread(str(image_path))
     if frame_bgr is None:
@@ -330,26 +233,9 @@ def run_detection_pipeline(
     resnet,
     preprocess,
     device,
-    top_n_pairs: int = 5
+    top_n_pairs: int = 5,
+    projection_head=None
 ) -> Tuple[np.ndarray, np.ndarray, np.ndarray, List[Dict[str, Any]], List[Tuple[int, int]], int]:
-    """
-    Run the full detection and matching pipeline on an image.
-    
-    Includes filtering to remove:
-    1. Masks that are fully contained within another mask (duplicate detections)
-    2. Masks that are too small (< 10% of average size)
-    
-    Args:
-        image_path: Path to the image file
-        predictor: SAM3 predictor
-        resnet: ResNet model
-        preprocess: ResNet preprocessing transform
-        device: PyTorch device
-        top_n_pairs: Number of pairs to detect
-        
-    Returns:
-        Tuple of (masks, boxes, embeddings, pairs_data, top_pairs, total_socks)
-    """
     from src.laundromat.inference import extract_features
     from src.laundromat.matching import find_best_pairs
     from src.laundromat.config import VideoProcessorConfig, DEFAULT_PAIR_COLORS
@@ -390,7 +276,7 @@ def run_detection_pipeline(
     
     # Extract features
     embeddings, valid_indices = extract_features(
-        frame_rgb, masks, boxes, resnet, preprocess, height, width, device
+        frame_rgb, masks, boxes, resnet, preprocess, height, width, device, projection_head
     )
     
     if len(embeddings) == 0:

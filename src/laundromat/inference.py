@@ -373,7 +373,8 @@ def extract_features(
     preprocess,
     height: int,
     width: int,
-    device: torch.device = None
+    device: torch.device = None,
+    projection_head: torch.nn.Module = None
 ) -> Tuple[np.ndarray, List[int]]:
     if device is None:
         device = torch.device("cpu")
@@ -420,7 +421,12 @@ def extract_features(
     batch = torch.stack(batch_tensors).to(device)
     
     with torch.no_grad():
-        embeddings = resnet(batch).cpu().numpy()
+        features = resnet(batch)
+        # Apply projection head if available for better sock-specific embeddings
+        if projection_head is not None:
+            embeddings = projection_head(features).cpu().numpy()
+        else:
+            embeddings = features.cpu().numpy()
     
     return embeddings, valid_indices
 
@@ -431,7 +437,8 @@ def run_inference_on_frame(
     preprocess,
     config: VideoProcessorConfig,
     device: torch.device = None,
-    timing: Optional[TimingContext] = None
+    timing: Optional[TimingContext] = None,
+    projection_head: torch.nn.Module = None
 ) -> Tuple[List[Dict[str, Any]], int, List[np.ndarray]]:
     height, width = frame_bgr.shape[:2]
     
@@ -492,7 +499,7 @@ def run_inference_on_frame(
     
     with timed_section(timing, "ResNet feature extraction", f"{len(masks)} socks"):
         embeddings, valid_indices = extract_features(
-            frame_rgb, masks, boxes, resnet, preprocess, height, width, device
+            frame_rgb, masks, boxes, resnet, preprocess, height, width, device, projection_head
         )
     
     if len(embeddings) == 0:
@@ -553,7 +560,8 @@ def inference_worker(
     resnet: torch.nn.Module,
     preprocess,
     config: VideoProcessorConfig,
-    device: torch.device = None
+    device: torch.device = None,
+    projection_head: torch.nn.Module = None
 ):
     while True:
         frame_bgr = input_queue.get()
@@ -563,7 +571,7 @@ def inference_worker(
         
         try:
             pairs_data, total_socks, basket_boxes = run_inference_on_frame(
-                frame_bgr, predictor, resnet, preprocess, config, device
+                frame_bgr, predictor, resnet, preprocess, config, device, None, projection_head
             )
             output_queue.put((pairs_data, total_socks, basket_boxes))
         except Exception as e:

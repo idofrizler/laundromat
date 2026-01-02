@@ -1,10 +1,3 @@
-"""
-Inference service wrapper for the Laundromat server.
-
-Provides a clean interface for running inference on frames
-and encoding results for network transfer.
-"""
-
 import os
 import sys
 import time
@@ -16,7 +9,7 @@ from dataclasses import dataclass, asdict, field
 # Add laundromat package to path
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from laundromat.models import load_sam3_predictor, load_resnet_feature_extractor
+from laundromat.models import load_sam3_predictor, load_resnet_feature_extractor, load_sock_projection_head
 from laundromat.inference import run_inference_on_frame
 from laundromat.config import VideoProcessorConfig
 from laundromat.timing import TimingContext, timed_section
@@ -33,18 +26,6 @@ class InferenceResult:
 
 
 def encode_mask_rle(mask: np.ndarray) -> Dict[str, Any]:
-    """
-    Encode a binary mask using Run-Length Encoding (RLE).
-    
-    This significantly reduces the data size for masks
-    (typically 10-50x smaller than raw arrays).
-    
-    Args:
-        mask: Binary mask as uint8 array (H, W)
-        
-    Returns:
-        Dictionary with 'counts' (RLE encoded), 'size' (H, W)
-    """
     # Flatten mask in column-major order (Fortran order) for COCO compatibility
     flat = mask.flatten(order='F')
     
@@ -66,15 +47,6 @@ def encode_mask_rle(mask: np.ndarray) -> Dict[str, Any]:
 
 
 def decode_mask_rle(rle: Dict[str, Any]) -> np.ndarray:
-    """
-    Decode a Run-Length Encoded mask.
-    
-    Args:
-        rle: Dictionary with 'counts' and 'size'
-        
-    Returns:
-        Binary mask as uint8 array (H, W)
-    """
     counts = rle['counts']
     h, w = rle['size']
     
@@ -93,29 +65,21 @@ def decode_mask_rle(rle: Dict[str, Any]) -> np.ndarray:
 
 
 class InferenceService:
-    """
-    Service for running sock pair inference.
     
-    Manages model loading and provides inference API.
-    """
-    
-    def __init__(self, model_path: Optional[str] = None):
-        """
-        Initialize the inference service.
-        
-        Args:
-            model_path: Path to SAM3 model weights.
-                       Uses environment variable MODEL_PATH or default if not provided.
-        """
+    def __init__(self, model_path: Optional[str] = None, projection_head_path: Optional[str] = None):
+
         self.model_path = model_path or os.environ.get('MODEL_PATH', 'sam3.pt')
+        self.projection_head_path = projection_head_path or os.environ.get(
+            'PROJECTION_HEAD_PATH', 'server/models/sock_projection_head.pt'
+        )
         self.predictor = None
         self.resnet = None
         self.preprocess = None
+        self.projection_head = None
         self.device = None
         self._loaded = False
     
     def load_models(self):
-        """Load SAM3 and ResNet models into memory."""
         if self._loaded:
             return
         
@@ -126,11 +90,13 @@ class InferenceService:
         self.resnet, self.preprocess, self.device = load_resnet_feature_extractor()
         print(f"ResNet50 loaded on device: {self.device}")
         
+        print("Loading sock projection head...")
+        self.projection_head = load_sock_projection_head(self.projection_head_path, self.device)
+        
         self._loaded = True
         print("Models loaded successfully.")
     
     def is_loaded(self) -> bool:
-        """Check if models are loaded."""
         return self._loaded
     
     def infer(
@@ -141,19 +107,7 @@ class InferenceService:
         exclude_basket: bool = False,
         enable_profiling: bool = True
     ) -> InferenceResult:
-        """
-        Run inference on a single frame.
-        
-        Args:
-            frame_bgr: BGR frame from OpenCV
-            top_n_pairs: Maximum number of pairs to detect
-            detection_prompt: Text prompt for SAM3 segmentation
-            exclude_basket: Enable basket detection and sock exclusion
-            enable_profiling: Whether to collect detailed timing breakdown
-            
-        Returns:
-            InferenceResult with pairs data, timing info, and basket masks
-        """
+
         if not self._loaded:
             self.load_models()
         
@@ -177,7 +131,8 @@ class InferenceService:
             self.preprocess,
             config,
             self.device,
-            timing=timing
+            timing=timing,
+            projection_head=self.projection_head
         )
         
         # Encode masks and tracking points for transfer
@@ -228,21 +183,7 @@ class InferenceService:
         max_dimension: int = 1280,
         enable_profiling: bool = True
     ) -> InferenceResult:
-        """
-        Run inference on a JPEG-encoded frame.
-        
-        Args:
-            jpeg_bytes: JPEG image as bytes
-            top_n_pairs: Maximum number of pairs to detect
-            detection_prompt: Text prompt for SAM3 segmentation
-            exclude_basket: Enable basket detection and sock exclusion
-            max_dimension: Maximum dimension (width or height) - images larger 
-                          than this will be resized to prevent OOM on CPU
-            enable_profiling: Whether to collect detailed timing breakdown
-            
-        Returns:
-            InferenceResult with pairs data and timing info
-        """
+
         if not self._loaded:
             self.load_models()
         
@@ -289,7 +230,8 @@ class InferenceService:
             self.preprocess,
             config,
             self.device,
-            timing=timing
+            timing=timing,
+            projection_head=self.projection_head
         )
         
         # Encode masks and tracking points for transfer
@@ -337,7 +279,6 @@ _service_instance: Optional[InferenceService] = None
 
 
 def get_inference_service() -> InferenceService:
-    """Get or create the singleton inference service instance."""
     global _service_instance
     if _service_instance is None:
         _service_instance = InferenceService()

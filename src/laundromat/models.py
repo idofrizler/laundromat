@@ -4,12 +4,15 @@ Model loading utilities for SAM3 and ResNet feature extractors.
 
 import os
 import torch
+import torch.nn as nn
 import torchvision.models as models
-from typing import Tuple, Any
+from typing import Tuple, Any, Optional
 
 from ultralytics.models.sam import SAM3SemanticPredictor
 
 from .config import SAM3_CONFIG, RESNET_PREPROCESS, DEFAULT_SAM3_MODEL_PATH
+
+DEFAULT_PROJECTION_HEAD_PATH = "server/models/sock_projection_head.pt"
 
 
 def get_device() -> torch.device:
@@ -30,19 +33,7 @@ def get_device() -> torch.device:
 
 
 def load_sam3_predictor(model_path: str = DEFAULT_SAM3_MODEL_PATH, device: torch.device = None) -> SAM3SemanticPredictor:
-    """
-    Load and configure the SAM3 semantic predictor.
-    
-    Args:
-        model_path: Path to the SAM3 model weights file.
-        device: Optional device to use. If None, auto-detects best available (CUDA > MPS > CPU).
-        
-    Returns:
-        Configured SAM3SemanticPredictor instance.
-        
-    Raises:
-        FileNotFoundError: If the model file doesn't exist.
-    """
+
     if not os.path.exists(model_path):
         raise FileNotFoundError(
             f"SAM3 model not found at '{model_path}'. "
@@ -69,18 +60,7 @@ def load_sam3_predictor(model_path: str = DEFAULT_SAM3_MODEL_PATH, device: torch
 
 
 def load_resnet_feature_extractor(device: torch.device = None) -> Tuple[torch.nn.Module, Any, torch.device]:
-    """
-    Load ResNet50 as a feature extractor (without the final classification layer).
-    
-    Args:
-        device: Optional device to use. If None, auto-detects best available.
-    
-    Returns:
-        Tuple of (model, preprocess_transform, device):
-            - model: ResNet50 with identity FC layer for feature extraction
-            - preprocess_transform: Torchvision transform for input preprocessing
-            - device: The device the model is loaded on
-    """
+
     if device is None:
         device = get_device()
     
@@ -94,3 +74,35 @@ def load_resnet_feature_extractor(device: torch.device = None) -> Tuple[torch.nn
     resnet = resnet.to(device)
     
     return resnet, RESNET_PREPROCESS, device
+
+def load_sock_projection_head(
+    model_path: str = DEFAULT_PROJECTION_HEAD_PATH,
+    device: torch.device = None
+) -> Optional[nn.Module]:
+
+    if not os.path.exists(model_path):
+        print(f"Projection head not found at '{model_path}', using raw ResNet features")
+        return None
+    
+    if device is None:
+        device = get_device()
+    
+    # Import here to avoid circular imports
+    from .finetune.model import SockProjectionHead
+    
+    checkpoint = torch.load(model_path, map_location=device, weights_only=True)
+    
+    projection_head = SockProjectionHead(
+        input_dim=checkpoint.get('input_dim', 2048),
+        hidden_dim=checkpoint.get('hidden_dim', 512),
+        output_dim=checkpoint.get('output_dim', 128),
+    )
+    projection_head.load_state_dict(checkpoint['model_state_dict'])
+    projection_head.eval()
+    projection_head = projection_head.to(device)
+    
+    accuracy = checkpoint.get('best_accuracy', 'unknown')
+    epoch = checkpoint.get('epoch', 'unknown')
+    print(f"Loaded sock projection head from '{model_path}' (epoch {epoch}, accuracy {accuracy})")
+    
+    return projection_head
